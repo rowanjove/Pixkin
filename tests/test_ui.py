@@ -20,6 +20,7 @@ from core.character_package import (
 )
 from core.config import ConfigManager
 from core.pet_animator import PetState
+from core.pet_generation_run import PetGenerationRunStore
 from core.secrets import SecretStore
 from ui.chat_window import BubbleShell, ChatBubbleWindow
 from ui.onboarding_window import FirstRunWindow
@@ -587,6 +588,50 @@ class UiSmokeTests(unittest.TestCase):
         self.assertFalse(lab.hatch_btn.isEnabled())
         old_worker.deleteLater.assert_called_once_with()
         lab.close()
+
+    def test_pet_lab_prioritizes_qa_error_states_for_retry(self):
+        report = {
+            "errors": [
+                {"code": "duplicate_actions", "states": ["talking", "idle"]},
+                {"code": "unsafe_margin", "state": "alerting"},
+            ],
+            "expected_states": [
+                "idle", "talking", "dragging", "alerting"
+            ],
+        }
+        self.assertEqual(
+            PetLabWindow._qa_retry_candidates(report),
+            ["talking", "idle", "alerting", "dragging"],
+        )
+
+    def test_pet_lab_final_confirmation_prefers_qa_contact_sheet(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            run = store.create(
+                run_id="preview-run",
+                request={"pet_name": "Nova"},
+                task_ids=["canonical", "idle"],
+            )
+            sheet = root / "assets" / "pixkin" / "pip-avatar.png"
+            store.update_stage(
+                run["id"],
+                "final_review",
+                status="needs_review",
+                artifacts={"qa_contact_sheet": str(sheet)},
+            )
+            manager = MagicMock()
+            lab = PetLabWindow(
+                self.config, manager, run_store=store
+            )
+            lab.active_run_id = run["id"]
+            dialog = MagicMock()
+
+            lab._set_package_preview(dialog, "generated.zip")
+
+            dialog.setIconPixmap.assert_called_once()
+            manager.read_zip_preview.assert_not_called()
+            lab.close()
 
     def test_pet_lab_declined_replacement_does_not_import(self):
         manager = MagicMock()
