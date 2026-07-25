@@ -71,6 +71,47 @@ class PetGenerationRunStoreTests(unittest.TestCase):
             self.assertEqual(parsed["stage"], "running")
             self.assertEqual(list(workspace.glob(".run-*.tmp")), [])
 
+    def test_api_call_metrics_are_persisted_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory))
+            run = store.create(
+                run_id="metrics-run",
+                request={},
+                task_ids=["canonical"],
+            )
+
+            store.record_api_call(
+                run["id"],
+                "canonical",
+                duration_ms=1250,
+                outcome="failed",
+                error_category="rate_limit",
+                retry_number=0,
+            )
+            recorded = store.record_api_call(
+                run["id"],
+                "canonical",
+                duration_ms=750,
+                outcome="success",
+                retry_number=1,
+            )
+
+            calls = recorded["metrics"]["api_calls"]
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["error_category"], "rate_limit")
+            self.assertEqual(calls[1]["retry_number"], 1)
+            self.assertEqual(
+                sum(call["duration_ms"] for call in calls),
+                2000,
+            )
+            with self.assertRaises(PetGenerationRunError):
+                store.record_api_call(
+                    run["id"],
+                    "canonical",
+                    duration_ms=1,
+                    outcome="unknown",
+                )
+
     def test_unsafe_run_id_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PetGenerationRunStore(Path(directory))

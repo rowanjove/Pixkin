@@ -3,10 +3,13 @@ import hashlib
 import io
 import re
 import shutil
+import time
 import uuid
 import zipfile
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 from openai import OpenAI
@@ -122,6 +125,8 @@ STANDARD_POSE_IDS = tuple(STANDARD_POSES)
 FULL_POSE_IDS = tuple(FULL_POSES)
 CORE_REVIEW_POSE_IDS = BASIC_POSE_IDS
 GENERATION_MODES = {"basic", "legacy_full", "standard", "full"}
+MAX_TRANSIENT_RETRIES = 2
+RETRY_DELAYS_SECONDS = (1.0, 2.0)
 HORIZONTAL_MIRROR_SOURCES = {
     "walk_left": "walk_right",
     "run_left": "run_right",
@@ -214,6 +219,7 @@ class PetGenerationWorker(QThread):
             if self.max_api_calls < 1:
                 raise ValueError("图像 API 调用预算必须至少为 1。")
         self._client = None
+        self._preflight_complete = False
         self.run_id = run_id
         self._run_store = run_store
         self.retry_task_id = retry_task_id
@@ -300,6 +306,90 @@ class PetGenerationWorker(QThread):
         )
 
     @staticmethod
+    def api_timing_summary(record):
+        calls = (
+            (record.get("metrics") or {}).get("api_calls") or []
+        )
+        durations = [
+            max(0, int(call.get("duration_ms", 0)))
+            for call in calls
+            if isinstance(call, dict)
+        ]
+        total_ms = sum(durations)
+        return {
+            "count": len(durations),
+            "total_ms": total_ms,
+            "average_ms": (
+                round(total_ms / len(durations))
+                if durations
+                else 0
+            ),
+            "successful": sum(
+                call.get("outcome") == "success"
+                for call in calls
+                if isinstance(call, dict)
+            ),
+            "failed": sum(
+                call.get("outcome") == "failed"
+                for call in calls
+                if isinstance(call, dict)
+            ),
+        }
+
+    @staticmethod
+    def classify_generation_error(exc):
+        status = getattr(exc, "status_code", None)
+        try:
+            status = int(status) if status is not None else None
+        except (TypeError, ValueError):
+            status = None
+        name = type(exc).__name__.lower()
+        if status == 401 or "authentication" in name:
+            category, retriable = "authentication", False
+        elif status == 403 or "permission" in name:
+            category, retriable = "permission", False
+        elif status in {400, 413, 415, 422} or "badrequest" in name:
+            category, retriable = "invalid_request", False
+        elif status == 404 or "notfound" in name:
+            category, retriable = "not_found", False
+        elif status == 429 or "ratelimit" in name:
+            category, retriable = "rate_limit", True
+        elif status in {408, 504} or "timeout" in name:
+            category, retriable = "timeout", True
+        elif status is not None and status >= 500:
+            category, retriable = "server", True
+        elif (
+            "没有返回可用图片" in str(exc)
+            or "图片数据损坏" in str(exc)
+        ):
+            category, retriable = "invalid_response", True
+        elif (
+            "connection" in name
+            or isinstance(exc, (ConnectionError, TimeoutError))
+        ):
+            category, retriable = "connection", True
+        else:
+            category, retriable = "unknown", False
+        labels = {
+            "authentication": "认证失败",
+            "permission": "接口无权限",
+            "invalid_request": "请求参数不受支持",
+            "not_found": "接口或模型不存在",
+            "rate_limit": "接口限流",
+            "timeout": "接口超时",
+            "server": "接口服务异常",
+            "invalid_response": "接口图片响应无效",
+            "connection": "网络连接失败",
+            "unknown": "未知错误",
+        }
+        return {
+            "category": category,
+            "retriable": retriable,
+            "label": labels[category],
+            "status_code": status,
+        }
+
+    @staticmethod
     def mirror_dependents(source_state: str):
         return tuple(
             target
@@ -364,10 +454,12 @@ class PetGenerationWorker(QThread):
                     self.run_id, "canonical_generation", status="running"
                 )
                 self._active_task_id = "canonical"
-                self._reserve_api_call("canonical")
                 prompt = self._base_prompt()
-                base_bytes = self._generate(
-                    client, self.reference_paths, prompt
+                base_bytes = self._generate_with_retry(
+                    task_id="canonical",
+                    client=client,
+                    paths=self.reference_paths,
+                    prompt=prompt,
                 )
                 self._store_candidate(
                     task_id="canonical",
@@ -769,13 +861,13 @@ class PetGenerationWorker(QThread):
             self.progress_changed.emit(
                 percent, f"正在绘制 {state} 姿态（{index}/{total}）…"
             )
-            self._reserve_api_call(state)
             self._active_task_id = state
             prompt = self._pose_prompt(pose)
-            pose_bytes = self._generate(
-                client,
-                [canonical, *self.reference_paths],
-                prompt,
+            pose_bytes = self._generate_with_retry(
+                task_id=state,
+                client=client,
+                paths=[canonical, *self.reference_paths],
+                prompt=prompt,
             )
             self._store_candidate(
                 task_id=state,
@@ -820,7 +912,7 @@ class PetGenerationWorker(QThread):
             if not path.is_file():
                 raise ValueError(f"参考图不存在：{path}")
 
-    def _reserve_api_call(self, task_id: str):
+    def _assert_api_budget_available(self):
         record = self._run_store.load(self.run_id)
         budget = record.get("request", {}).get("max_api_calls")
         used = self.api_calls_used(record)
@@ -829,12 +921,76 @@ class PetGenerationWorker(QThread):
                 f"图像 API 调用预算已用尽（{used}/{int(budget)}）。"
                 "请在继续任务时提高预算，或保留当前产物稍后处理。"
             )
+        return record
+
+    def _reserve_api_call(self, task_id: str):
+        self._assert_api_budget_available()
         self._run_store.update_task(
             self.run_id,
             task_id,
             "running",
             increment_attempt=True,
         )
+
+    def _generate_with_retry(
+        self,
+        *,
+        task_id: str,
+        client,
+        paths,
+        prompt: str,
+    ):
+        self._assert_api_budget_available()
+        self._preflight_generation_client(client)
+        for retry_number in range(MAX_TRANSIENT_RETRIES + 1):
+            self._reserve_api_call(task_id)
+            started = time.monotonic()
+            try:
+                result = self._generate(client, paths, prompt)
+            except Exception as exc:
+                duration_ms = round(
+                    (time.monotonic() - started) * 1000
+                )
+                details = self.classify_generation_error(exc)
+                self._run_store.record_api_call(
+                    self.run_id,
+                    task_id,
+                    duration_ms=duration_ms,
+                    outcome="failed",
+                    error_category=details["category"],
+                    retry_number=retry_number,
+                )
+                if (
+                    not details["retriable"]
+                    or retry_number >= MAX_TRANSIENT_RETRIES
+                ):
+                    raise RuntimeError(
+                        f"{details['label']}：{exc}"
+                    ) from exc
+                delay = RETRY_DELAYS_SECONDS[
+                    min(retry_number, len(RETRY_DELAYS_SECONDS) - 1)
+                ]
+                self.progress_changed.emit(
+                    0,
+                    f"{details['label']}，{delay:g} 秒后自动重试"
+                    f"（{retry_number + 1}/{MAX_TRANSIENT_RETRIES}）…",
+                )
+                if self.isInterruptionRequested():
+                    raise RuntimeError("孵化任务已取消。") from exc
+                time.sleep(delay)
+                continue
+            duration_ms = round(
+                (time.monotonic() - started) * 1000
+            )
+            self._run_store.record_api_call(
+                self.run_id,
+                task_id,
+                duration_ms=duration_ms,
+                outcome="success",
+                retry_number=retry_number,
+            )
+            return result
+        raise RuntimeError("图像生成重试流程异常结束。")
 
     def _generation_client(self):
         if self._client is None:
@@ -845,6 +1001,92 @@ class PetGenerationWorker(QThread):
                 max_retries=0,
             )
         return self._client
+
+    def _preflight_generation_client(self, client):
+        if self._preflight_complete:
+            return
+        endpoint = self.base_url or "https://api.openai.com/v1"
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("图像接口地址必须是完整的 HTTP(S) URL。")
+        model = self.model or "gpt-image-2"
+        quality = self.quality or "medium"
+        if not model.strip():
+            raise ValueError("图像模型名不能为空。")
+        if quality not in {"low", "medium", "high"}:
+            raise ValueError("图像质量必须是 low、medium 或 high。")
+        edit = getattr(getattr(client, "images", None), "edit", None)
+        if not callable(edit):
+            raise ValueError("当前接口客户端不支持图像编辑能力。")
+
+        cache_key = hashlib.sha256(
+            f"{endpoint.rstrip('/')}|{model}".encode("utf-8")
+        ).hexdigest()[:16]
+        record = self._run_store.load(self.run_id)
+        cached = record.get("request", {}).get(
+            "capability_preflight", {}
+        )
+        if (
+            isinstance(cached, dict)
+            and cached.get("key") == cache_key
+            and cached.get("status") in {"verified", "unverified"}
+        ):
+            self._preflight_complete = True
+            return
+
+        status = "verified"
+        note = "模型查询成功，图像编辑方法可用。"
+        retrieve = getattr(
+            getattr(client, "models", None),
+            "retrieve",
+            None,
+        )
+        if not callable(retrieve):
+            status = "unverified"
+            note = "兼容接口未提供模型查询方法，已保留图像编辑能力检查。"
+        else:
+            try:
+                retrieve(model, timeout=15.0)
+            except Exception as exc:
+                details = self.classify_generation_error(exc)
+                official = parsed.hostname in {
+                    "api.openai.com",
+                    "www.api.openai.com",
+                }
+                if details["category"] in {
+                    "authentication",
+                    "permission",
+                } or (
+                    official
+                    and details["category"] in {
+                        "invalid_request",
+                        "not_found",
+                    }
+                ):
+                    raise RuntimeError(
+                        f"图像接口预检失败（{details['label']}）：{exc}"
+                    ) from exc
+                status = "unverified"
+                note = (
+                    f"模型查询无法验证（{details['label']}），"
+                    "将由首次图像请求确认能力。"
+                )
+        self._run_store.update_request(
+            self.run_id,
+            {
+                "capability_preflight": {
+                    "key": cache_key,
+                    "status": status,
+                    "endpoint": endpoint,
+                    "model": model,
+                    "checked_at": datetime.now(
+                        timezone.utc
+                    ).isoformat(timespec="seconds"),
+                    "note": note,
+                }
+            },
+        )
+        self._preflight_complete = True
 
     def _snapshot_references(self):
         references_dir = (
@@ -1050,10 +1292,17 @@ class PetGenerationWorker(QThread):
                 quality=self.quality or "medium",
                 response_format="b64_json",
             )
-        encoded = result.data[0].b64_json
+        encoded = (
+            result.data[0].b64_json
+            if getattr(result, "data", None)
+            else None
+        )
         if not encoded:
             raise RuntimeError("图像服务没有返回可用图片。")
-        return base64.b64decode(encoded)
+        try:
+            return base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("图像服务返回的图片数据损坏。") from exc
 
     def _base_prompt(self):
         notes = self.style_notes or "Preserve the reference's broad color mood."
@@ -1170,9 +1419,16 @@ class PetGenerationWorker(QThread):
         else:
             quality_tier = "basic"
         api_calls_used = 0
+        timing_summary = self.api_timing_summary({})
+        capability_preflight = {}
         if self.run_id and self._run_store is not None:
-            api_calls_used = self.api_calls_used(
-                self._run_store.load(self.run_id)
+            run_record = self._run_store.load(self.run_id)
+            api_calls_used = self.api_calls_used(run_record)
+            timing_summary = self.api_timing_summary(run_record)
+            capability_preflight = dict(
+                run_record.get("request", {}).get(
+                    "capability_preflight", {}
+                )
             )
         metadata = {
             "schema_version": "2.0",
@@ -1288,6 +1544,8 @@ class PetGenerationWorker(QThread):
                     ),
                     "max_api_calls": self.max_api_calls,
                     "api_calls_used": api_calls_used,
+                    "api_timing": timing_summary,
+                    "capability_preflight": capability_preflight,
                     "key_pose_canvas": [192, 208],
                     "anchor": [96, 194],
                 },

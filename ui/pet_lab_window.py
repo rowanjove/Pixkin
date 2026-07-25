@@ -399,6 +399,7 @@ class PetLabWindow(QDialog):
             f"本次计划调用 {planned_calls} 次图像 API，"
             f"最大预算为 {budget} 次。\n"
             "身份稿确认后才会继续生成动作；达到预算时任务会安全停止。"
+            "限流、超时和服务异常最多自动退避重试 2 次，且每次都计入预算。"
             "\n确认开始吗？",
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
@@ -1056,8 +1057,14 @@ class PetLabWindow(QDialog):
                 if budget is not None
                 else str(used)
             )
+            timing = PetGenerationWorker.api_timing_summary(record)
+            elapsed = (
+                f" · {timing['total_ms'] / 1000:.1f}s"
+                if timing["count"]
+                else ""
+            )
             self.run_input.addItem(
-                f"{name} · {stage} · API {usage}",
+                f"{name} · {stage} · API {usage}{elapsed}",
                 record["id"],
             )
         if not resumable:
