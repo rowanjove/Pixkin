@@ -205,6 +205,24 @@ class UiSmokeTests(unittest.TestCase):
                 pet._show_edge_idle()
                 animate.assert_not_called()
 
+            pet.dock_side = "right"
+            pet.is_docked = False
+            pet.animator.set_state(PetState.EDGE_EXIT_RIGHT)
+            pet.tick = pet._state_started_tick
+            self.assertTrue(pet._should_draw_edge_art())
+            exit_render = pet.grab()
+            exit_subject = QRegion(exit_render.mask()).boundingRect()
+            exit_frame = pet._current_package_frame("edge_exit_right")
+            _scaled, expected_subject = pet._scaled_edge_art(exit_frame)
+            self.assertEqual(
+                exit_subject.width(),
+                expected_subject.width(),
+            )
+            self.assertEqual(
+                exit_subject.height(),
+                expected_subject.height(),
+            )
+
             pet.close()
             pet.chat_window.close()
 

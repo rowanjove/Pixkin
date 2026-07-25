@@ -130,6 +130,28 @@ class SecretStoreTests(unittest.TestCase):
         with patch.dict(sys.modules, {"win32cred": fake}):
             self.assertTrue(SecretStore._write("test", "", ""))
 
+    def test_credential_write_passes_unicode_blob_to_pywin32(self):
+        written = {}
+
+        def write(credential, flags):
+            written.update(credential)
+            written["flags"] = flags
+
+        fake = SimpleNamespace(
+            CRED_TYPE_GENERIC=1,
+            CRED_PERSIST_LOCAL_MACHINE=2,
+            CredWrite=write,
+        )
+        with patch.dict(sys.modules, {"win32cred": fake}):
+            self.assertTrue(
+                SecretStore._write("test", "sk-测试", "Pixkin test")
+            )
+
+        self.assertEqual(written["CredentialBlob"], "sk-测试")
+        self.assertIsInstance(written["CredentialBlob"], str)
+        self.assertEqual(written["TargetName"], "test")
+        self.assertEqual(written["flags"], 0)
+
     def test_clearing_chat_key_removes_new_and_legacy_targets(self):
         values = {
             CHAT_TARGET: "new-secret",

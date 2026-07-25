@@ -50,7 +50,7 @@ class SecretStore:
                     "Type": win32cred.CRED_TYPE_GENERIC,
                     "TargetName": target,
                     "UserName": "Pixkin",
-                    "CredentialBlob": (value + "\x00").encode("utf-16-le"),
+                    "CredentialBlob": value,
                     "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
                     "Comment": comment,
                 },
