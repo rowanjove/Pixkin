@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+import shutil
 import uuid
 import zipfile
 from contextlib import ExitStack
@@ -50,6 +51,7 @@ class PetGenerationWorker(QThread):
 
     progress_changed = pyqtSignal(int, str)
     run_created = pyqtSignal(str)
+    review_ready = pyqtSignal(str, str)
     package_ready = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
 
@@ -65,6 +67,9 @@ class PetGenerationWorker(QThread):
         style_notes: str,
         reference_paths,
         full_hatch: bool = True,
+        run_id: str = None,
+        run_store: PetGenerationRunStore = None,
+        retry_task_id: str = None,
     ):
         super().__init__()
         self.api_key = api_key
@@ -77,8 +82,37 @@ class PetGenerationWorker(QThread):
         self.reference_paths = [Path(path) for path in reference_paths][:4]
         self.full_hatch = full_hatch
         self._client = None
-        self.run_id = None
-        self._run_store = None
+        self.run_id = run_id
+        self._run_store = run_store
+        self.retry_task_id = retry_task_id
+        self._active_task_id = None
+
+    @classmethod
+    def resume_from(
+        cls,
+        *,
+        run_id: str,
+        api_key: str,
+        run_store: PetGenerationRunStore = None,
+        retry_task_id: str = None,
+    ):
+        store = run_store or PetGenerationRunStore()
+        record = store.load(run_id)
+        request = record["request"]
+        return cls(
+            api_key=api_key,
+            base_url=str(request.get("image_base_url", "")),
+            model=str(request.get("image_model", "gpt-image-2")),
+            quality=str(request.get("image_quality", "medium")),
+            pet_name=str(request.get("pet_name", "My Pixkin")),
+            personality=str(request.get("personality", "")),
+            style_notes=str(request.get("style_notes", "")),
+            reference_paths=request.get("reference_paths", []),
+            full_hatch=request.get("mode") == "full",
+            run_id=run_id,
+            run_store=store,
+            retry_task_id=retry_task_id,
+        )
 
     def cancel(self):
         self.requestInterruption()
@@ -90,83 +124,133 @@ class PetGenerationWorker(QThread):
 
     def run(self):
         try:
-            if not self.api_key:
-                raise ValueError("请先在伙伴工坊中填写图像 API Key。")
-            if not self.reference_paths:
-                raise ValueError("至少需要一张风格示意图。")
-            for path in self.reference_paths:
-                if not path.is_file():
-                    raise ValueError(f"参考图不存在：{path}")
-
-            client = OpenAI(
-                api_key=self.api_key,
-                base_url=self.base_url or "https://api.openai.com/v1",
-                timeout=180.0,
-                max_retries=0,
-            )
-            self._client = client
+            self._run_store = self._run_store or PetGenerationRunStore()
+            pose_items = self._pose_items()
             slug = self._slug()
-            self.run_id = f"{slug}-{uuid.uuid4().hex[:8]}"
-            self._run_store = PetGenerationRunStore()
-            if self.full_hatch:
-                pose_items = list(POSES.items())
-            else:
-                pose_items = [
-                    (state, POSES[state]) for state in BASIC_POSE_IDS
-                ]
-            self._run_store.create(
-                run_id=self.run_id,
-                request={
-                    "pet_name": self.pet_name,
-                    "personality": self.personality,
-                    "style_notes": self.style_notes,
-                    "reference_paths": [
-                        str(path) for path in self.reference_paths
+            if self.run_id is None:
+                self._validate_generation_inputs()
+                self.run_id = f"{slug}-{uuid.uuid4().hex[:8]}"
+                self._run_store.create(
+                    run_id=self.run_id,
+                    request={
+                        "pet_name": self.pet_name,
+                        "personality": self.personality,
+                        "style_notes": self.style_notes,
+                        "reference_paths": [
+                            str(path) for path in self.reference_paths
+                        ],
+                        "mode": "full" if self.full_hatch else "draft",
+                        "image_base_url": self.base_url,
+                        "image_model": self.model,
+                        "image_quality": self.quality,
+                    },
+                    task_ids=[
+                        "canonical", *(state for state, _ in pose_items)
                     ],
-                    "mode": "full" if self.full_hatch else "draft",
-                    "image_base_url": self.base_url,
-                    "image_model": self.model,
-                    "image_quality": self.quality,
-                },
-                task_ids=["canonical", *(state for state, _ in pose_items)],
-            )
-            self.run_created.emit(self.run_id)
+                )
+                self.run_created.emit(self.run_id)
+                self._snapshot_references()
+            record = self._run_store.load(self.run_id)
             work = self._run_store.workspace(self.run_id)
             images_dir = work / "images"
-            images_dir.mkdir(parents=True)
+            images_dir.mkdir(parents=True, exist_ok=True)
 
-            self.progress_changed.emit(2, "正在读取风格参考…")
-            self._run_store.update_stage(
-                self.run_id, "canonical_generation", status="running"
-            )
-            self._run_store.update_task(
-                self.run_id,
-                "canonical",
-                "running",
-                increment_attempt=True,
-            )
-            base_prompt = self._base_prompt()
-            base_bytes = self._generate(
-                client, self.reference_paths, base_prompt
-            )
             canonical = images_dir / "canonical.png"
-            self._save_sprite(base_bytes, canonical)
-            self._run_store.update_task(
-                self.run_id,
-                "canonical",
-                "complete",
-                artifact="images/canonical.png",
+            canonical_complete = (
+                record["tasks"]["canonical"]["status"] == "complete"
+                and canonical.is_file()
             )
-            if self.isInterruptionRequested():
-                self._mark_canceled()
+            if self.retry_task_id == "canonical":
+                self._run_store.reset_task(self.run_id, "canonical")
+                canonical_complete = False
+            if not canonical_complete:
+                self._validate_generation_inputs()
+                client = self._generation_client()
+                self.progress_changed.emit(2, "正在读取风格参考…")
+                self._run_store.update_stage(
+                    self.run_id, "canonical_generation", status="running"
+                )
+                self._active_task_id = "canonical"
+                self._run_store.update_task(
+                    self.run_id,
+                    "canonical",
+                    "running",
+                    increment_attempt=True,
+                )
+                base_bytes = self._generate(
+                    client, self.reference_paths, self._base_prompt()
+                )
+                self._save_sprite(base_bytes, canonical)
+                self._run_store.update_task(
+                    self.run_id,
+                    "canonical",
+                    "complete",
+                    artifact="images/canonical.png",
+                )
+                self._active_task_id = None
+                if self.isInterruptionRequested():
+                    self._mark_canceled()
+                    return
+                self._run_store.update_stage(
+                    self.run_id,
+                    "canonical_review",
+                    status="needs_review",
+                    artifacts={"canonical": str(canonical)},
+                )
+                self.progress_changed.emit(
+                    10, "身份稿已生成，请确认角色身份后继续。"
+                )
+                self.review_ready.emit(self.run_id, str(canonical))
                 return
 
+            record = self._run_store.load(self.run_id)
+            canonical_review = record["reviews"].get("canonical", {})
+            if canonical_review.get("decision") != "accepted":
+                self._run_store.update_stage(
+                    self.run_id,
+                    "canonical_review",
+                    status="needs_review",
+                    artifacts={"canonical": str(canonical)},
+                )
+                self.progress_changed.emit(
+                    10, "身份稿等待确认；尚未生成动作。"
+                )
+                self.review_ready.emit(self.run_id, str(canonical))
+                return
+
+            if record.get("stage") == "final_review":
+                package = Path(str(record["artifacts"].get("package", "")))
+                if package.is_file():
+                    self.progress_changed.emit(
+                        100, "角色包等待最终预览与安装确认。"
+                    )
+                    self.package_ready.emit(str(package))
+                    return
+
+            self._validate_generation_inputs()
+            client = self._generation_client()
             self._run_store.update_stage(
                 self.run_id, "action_generation", status="running"
             )
             generated = {}
             total = len(pose_items)
             for index, (state, pose) in enumerate(pose_items, start=1):
+                record = self._run_store.load(self.run_id)
+                task = record["tasks"][state]
+                target = images_dir / f"{state}.png"
+                if (
+                    self.retry_task_id not in {None, state}
+                    or (
+                        task["status"] == "complete"
+                        and target.is_file()
+                        and self.retry_task_id != state
+                    )
+                ):
+                    if task["status"] == "complete" and target.is_file():
+                        generated[state] = target
+                    continue
+                if self.retry_task_id == state:
+                    self._run_store.reset_task(self.run_id, state)
                 if self.isInterruptionRequested():
                     self._mark_canceled()
                     return
@@ -180,11 +264,11 @@ class PetGenerationWorker(QThread):
                     "running",
                     increment_attempt=True,
                 )
+                self._active_task_id = state
                 inputs = [canonical, *self.reference_paths]
                 pose_bytes = self._generate(
                     client, inputs, self._pose_prompt(pose)
                 )
-                target = images_dir / f"{state}.png"
                 self._save_sprite(pose_bytes, target)
                 generated[state] = target
                 self._run_store.update_task(
@@ -192,6 +276,32 @@ class PetGenerationWorker(QThread):
                     state,
                     "complete",
                     artifact=f"images/{state}.png",
+                )
+                self._active_task_id = None
+
+            record = self._run_store.load(self.run_id)
+            incomplete = [
+                state
+                for state, _ in pose_items
+                if (
+                    record["tasks"][state]["status"] != "complete"
+                    or not (images_dir / f"{state}.png").is_file()
+                )
+            ]
+            if incomplete:
+                if self.retry_task_id:
+                    self._run_store.update_stage(
+                        self.run_id,
+                        "action_generation",
+                        status="pending",
+                    )
+                    self.progress_changed.emit(
+                        85,
+                        "选中动作已重试；其余未完成动作可继续生成。",
+                    )
+                    return
+                raise RuntimeError(
+                    "仍有动作尚未完成：" + "、".join(incomplete)
                 )
 
             self.progress_changed.emit(94, "正在组装 Pixkin 角色包…")
@@ -201,11 +311,13 @@ class PetGenerationWorker(QThread):
             zip_path = self._package(work, slug, generated)
             self._run_store.update_stage(
                 self.run_id,
-                "ready",
-                status="complete",
+                "final_review",
+                status="needs_review",
                 artifacts={"package": str(zip_path)},
             )
-            self.progress_changed.emit(100, "你的新伙伴孵化完成。")
+            self.progress_changed.emit(
+                100, "角色包已完成，请最终预览并确认安装。"
+            )
             self.package_ready.emit(str(zip_path))
         except Exception as exc:
             if self._run_store is not None and self.run_id:
@@ -213,6 +325,13 @@ class PetGenerationWorker(QThread):
                     if self.isInterruptionRequested():
                         self._mark_canceled()
                     else:
+                        if self._active_task_id:
+                            self._run_store.update_task(
+                                self.run_id,
+                                self._active_task_id,
+                                "failed",
+                                error=str(exc),
+                            )
                         self._run_store.update_stage(
                             self.run_id,
                             "failed",
@@ -231,8 +350,56 @@ class PetGenerationWorker(QThread):
                     pass
                 self._client = None
 
+    def _pose_items(self):
+        if self.full_hatch:
+            return list(POSES.items())
+        return [(state, POSES[state]) for state in BASIC_POSE_IDS]
+
+    def _validate_generation_inputs(self):
+        if not self.api_key:
+            raise ValueError("请先在伙伴工坊中填写图像 API Key。")
+        if not self.reference_paths:
+            raise ValueError("至少需要一张风格示意图。")
+        for path in self.reference_paths:
+            if not path.is_file():
+                raise ValueError(f"参考图不存在：{path}")
+
+    def _generation_client(self):
+        if self._client is None:
+            self._client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url or "https://api.openai.com/v1",
+                timeout=180.0,
+                max_retries=0,
+            )
+        return self._client
+
+    def _snapshot_references(self):
+        references_dir = (
+            self._run_store.workspace(self.run_id) / "references"
+        )
+        references_dir.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for index, source in enumerate(self.reference_paths, start=1):
+            suffix = source.suffix.lower() or ".png"
+            destination = references_dir / f"reference-{index}{suffix}"
+            shutil.copy2(source, destination)
+            copied.append(destination)
+        self.reference_paths = copied
+        self._run_store.update_request(
+            self.run_id,
+            {"reference_paths": [str(path) for path in copied]},
+        )
+
     def _mark_canceled(self):
         if self._run_store is not None and self.run_id:
+            if self._active_task_id:
+                self._run_store.update_task(
+                    self.run_id,
+                    self._active_task_id,
+                    "canceled",
+                )
+                self._active_task_id = None
             self._run_store.update_stage(
                 self.run_id,
                 "canceled",

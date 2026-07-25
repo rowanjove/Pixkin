@@ -79,11 +79,12 @@ class PetGeneratorTests(unittest.TestCase):
                 for state in POSES:
                     self.assertIn(f"images/{state}.png", names)
 
-    def test_worker_persists_a_complete_draft_run_manifest(self):
+    def test_worker_pauses_for_identity_review_then_builds_draft(self):
         root = Path(__file__).resolve().parents[1]
         reference = root / "assets" / "pixkin" / "pip-avatar.png"
         with tempfile.TemporaryDirectory() as directory:
             data_root = Path(directory)
+            store = PetGenerationRunStore(data_root / "pet-lab" / "runs")
             worker = PetGenerationWorker(
                 api_key="test",
                 base_url="https://api.openai.com/v1",
@@ -94,13 +95,10 @@ class PetGeneratorTests(unittest.TestCase):
                 style_notes="珊瑚色围巾",
                 reference_paths=[reference],
                 full_hatch=False,
+                run_store=store,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
-                patch(
-                    "core.pet_generation_run.user_data_dir",
-                    return_value=data_root,
-                ),
                 patch.object(
                     worker,
                     "_generate",
@@ -109,19 +107,53 @@ class PetGeneratorTests(unittest.TestCase):
             ):
                 worker.run()
 
-            store = PetGenerationRunStore(data_root / "pet-lab" / "runs")
             runs = store.list_runs()
             self.assertEqual(len(runs), 1)
-            self.assertEqual(runs[0]["status"], "complete")
-            self.assertEqual(runs[0]["stage"], "ready")
+            self.assertEqual(runs[0]["status"], "needs_review")
+            self.assertEqual(runs[0]["stage"], "canonical_review")
             self.assertEqual(
                 runs[0]["tasks"]["canonical"]["status"], "complete"
             )
+            stored_references = [
+                Path(path)
+                for path in runs[0]["request"]["reference_paths"]
+            ]
+            self.assertEqual(len(stored_references), 1)
+            self.assertTrue(stored_references[0].is_file())
+            self.assertEqual(
+                stored_references[0].parent.name, "references"
+            )
             for state in BASIC_POSE_IDS:
                 self.assertEqual(
-                    runs[0]["tasks"][state]["status"], "complete"
+                    runs[0]["tasks"][state]["status"], "pending"
                 )
-            package_path = Path(runs[0]["artifacts"]["package"])
+
+            store.record_review(
+                runs[0]["id"], "canonical", "accepted"
+            )
+            resumed = PetGenerationWorker.resume_from(
+                run_id=runs[0]["id"],
+                api_key="test",
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    resumed,
+                    "_generate",
+                    return_value=reference.read_bytes(),
+                ),
+            ):
+                resumed.run()
+
+            ready = store.load(runs[0]["id"])
+            self.assertEqual(ready["status"], "needs_review")
+            self.assertEqual(ready["stage"], "final_review")
+            for state in BASIC_POSE_IDS:
+                self.assertEqual(
+                    ready["tasks"][state]["status"], "complete"
+                )
+            package_path = Path(ready["artifacts"]["package"])
             self.assertTrue(package_path.is_file())
             config = ConfigManager(str(data_root / "config.json"))
             package_manager = CharacterPackageManager(
@@ -131,6 +163,77 @@ class PetGeneratorTests(unittest.TestCase):
             inspected = package_manager.inspect_zip(str(package_path))
             self.assertEqual(inspected.schema_version, "2.0")
             self.assertEqual(inspected.quality_tier, "basic")
+
+    def test_retrying_one_failed_action_does_not_redraw_completed_work(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            first = PetGenerationWorker(
+                api_key="test",
+                base_url="https://api.openai.com/v1",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="温暖可靠",
+                style_notes="",
+                reference_paths=[reference],
+                full_hatch=False,
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    first,
+                    "_generate",
+                    return_value=reference.read_bytes(),
+                ),
+            ):
+                first.run()
+            run = store.list_runs()[0]
+            store.record_review(run["id"], "canonical", "accepted")
+
+            failed = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    failed,
+                    "_generate",
+                    side_effect=RuntimeError("temporary image failure"),
+                ),
+            ):
+                failed.run()
+            self.assertEqual(
+                store.load(run["id"])["tasks"]["idle"]["status"], "failed"
+            )
+
+            retried = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+                retry_task_id="idle",
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    retried,
+                    "_generate",
+                    return_value=reference.read_bytes(),
+                ) as generate,
+            ):
+                retried.run()
+
+            record = store.load(run["id"])
+            self.assertEqual(generate.call_count, 1)
+            self.assertEqual(record["status"], "pending")
+            self.assertEqual(record["stage"], "action_generation")
+            self.assertEqual(record["tasks"]["idle"]["status"], "complete")
+            self.assertEqual(record["tasks"]["idle"]["attempts"], 2)
+            self.assertEqual(record["tasks"]["talking"]["status"], "pending")
 
 
 if __name__ == "__main__":

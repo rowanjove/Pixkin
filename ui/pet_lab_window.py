@@ -11,6 +11,10 @@ from PyQt6.QtWidgets import (
 from core.character_package import CharacterPackageError, CharacterPackageManager
 from core.config import ConfigManager
 from core.paths import resource_path
+from core.pet_generation_run import (
+    PetGenerationRunError,
+    PetGenerationRunStore,
+)
 from core.pet_generator import PetGenerationWorker
 from core.secrets import SecretStore
 from ui.theme import resolved_theme
@@ -24,6 +28,7 @@ class PetLabWindow(QDialog):
         config_manager: ConfigManager,
         package_manager: CharacterPackageManager,
         parent=None,
+        run_store: PetGenerationRunStore = None,
     ):
         super().__init__(parent)
         self.config_manager = config_manager
@@ -31,6 +36,8 @@ class PetLabWindow(QDialog):
         self.generated_package = None
         self.reference_paths = []
         self.worker = None
+        self.run_store = run_store or PetGenerationRunStore()
+        self.active_run_id = None
         self._close_after_cancel = False
         self.setWindowTitle("Pixkin · 伙伴工坊")
         self.setWindowIcon(QIcon(str(resource_path("assets/pixkin.ico"))))
@@ -41,6 +48,7 @@ class PetLabWindow(QDialog):
             self._style(resolved_theme(self.config_manager))
         )
         self._build_ui()
+        self._refresh_runs()
 
     @staticmethod
     def _style(theme="dark"):
@@ -225,7 +233,7 @@ class PetLabWindow(QDialog):
         self.style_input.setFixedHeight(66)
         self.mode_input = QComboBox()
         self.mode_input.addItem("完整孵化 · 9 个动作姿态", True)
-        self.mode_input.addItem("快速草稿 · 单姿态预览", False)
+        self.mode_input.addItem("基础孵化 · 4 个核心动作", False)
         form.addRow("角色名字", self.name_input)
         form.addRow("性格设定", self.personality_input)
         form.addRow("风格补充", self.style_input)
@@ -256,11 +264,32 @@ class PetLabWindow(QDialog):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.hide()
-        self.status = QLabel("完整孵化会进行 10 次图像生成；快速草稿会进行 2 次。")
+        self.status = QLabel("完整孵化会进行 10 次图像生成；基础孵化会进行 5 次。")
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
         layout.addWidget(self.progress)
         layout.addWidget(self.status)
+
+        resume_row = QHBoxLayout()
+        self.run_input = QComboBox()
+        self.run_input.setToolTip("身份待确认、失败或尚未安装的孵化任务")
+        self.run_input.currentIndexChanged.connect(self._on_run_changed)
+        self.continue_btn = QPushButton("继续未完成任务")
+        self.continue_btn.setObjectName("secondary")
+        self.continue_btn.clicked.connect(self._continue_run)
+        resume_row.addWidget(self.run_input, 1)
+        resume_row.addWidget(self.continue_btn)
+        layout.addLayout(resume_row)
+
+        retry_row = QHBoxLayout()
+        self.retry_task_input = QComboBox()
+        self.retry_task_input.setToolTip("仅重新生成失败或取消的单个动作")
+        self.retry_btn = QPushButton("重试选中动作")
+        self.retry_btn.setObjectName("secondary")
+        self.retry_btn.clicked.connect(self._retry_selected_task)
+        retry_row.addWidget(self.retry_task_input, 1)
+        retry_row.addWidget(self.retry_btn)
+        layout.addLayout(retry_row)
 
         footer = QHBoxLayout()
         footer.addStretch()
@@ -356,9 +385,15 @@ class PetLabWindow(QDialog):
             style_notes=self.style_input.toPlainText().strip(),
             reference_paths=self.reference_paths,
             full_hatch=bool(self.mode_input.currentData()),
+            run_store=self.run_store,
         )
+        self._start_worker(worker)
+
+    def _start_worker(self, worker):
         self.worker = worker
         worker.progress_changed.connect(self._on_progress)
+        worker.run_created.connect(self._on_run_created)
+        worker.review_ready.connect(self._on_review_ready)
         worker.error_occurred.connect(self._on_error)
         worker.package_ready.connect(self._on_package_ready)
         worker.finished.connect(
@@ -367,9 +402,15 @@ class PetLabWindow(QDialog):
             )
         )
         self.hatch_btn.setDisabled(True)
+        self.continue_btn.setDisabled(True)
+        self.retry_btn.setDisabled(True)
         self.progress.show()
         self.progress.setValue(0)
         worker.start()
+
+    def _on_run_created(self, run_id: str):
+        self.active_run_id = run_id
+        self._refresh_runs(run_id)
 
     def _on_progress(self, value: int, text: str):
         self.progress.setValue(value)
@@ -378,6 +419,66 @@ class PetLabWindow(QDialog):
     def _on_error(self, message: str):
         self.status.setText("孵化没有完成。请检查接口、模型和额度后重试。")
         QMessageBox.critical(self, "伙伴工坊遇到问题", message)
+        self._refresh_runs(self.active_run_id)
+
+    def _on_review_ready(self, run_id: str, image_path: str):
+        self.active_run_id = run_id
+        decision = self._confirm_canonical(image_path)
+        if decision == "accepted":
+            self.run_store.record_review(run_id, "canonical", "accepted")
+            self.run_store.update_stage(
+                run_id, "action_generation", status="pending"
+            )
+            self._resume_run(run_id)
+        elif decision == "rejected":
+            self.run_store.record_review(run_id, "canonical", "rejected")
+            self.run_store.reset_task(run_id, "canonical")
+            self.run_store.update_stage(
+                run_id, "canonical_generation", status="pending"
+            )
+            self._resume_run(run_id, retry_task_id="canonical")
+        else:
+            self.run_store.record_review(run_id, "canonical", "deferred")
+            self.status.setText(
+                "身份稿已保留。可随时从“未完成任务”继续。"
+            )
+            self._refresh_runs(run_id)
+
+    def _confirm_canonical(self, image_path: str) -> str:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("确认伙伴身份稿")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText("先确认角色身份，再生成全部动作。")
+        dialog.setInformativeText(
+            "请检查轮廓、配色、脸部特征和配饰是否正确。"
+            "确认后，后续姿态会以这张身份稿为唯一基准。"
+        )
+        accept = dialog.addButton(
+            "身份正确，继续", QMessageBox.ButtonRole.AcceptRole
+        )
+        regenerate = dialog.addButton(
+            "重新生成", QMessageBox.ButtonRole.DestructiveRole
+        )
+        later = dialog.addButton(
+            "稍后处理", QMessageBox.ButtonRole.RejectRole
+        )
+        pixmap = QPixmap(image_path)
+        if not pixmap.isNull():
+            dialog.setIconPixmap(pixmap.scaled(
+                220,
+                220,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is accept:
+            return "accepted"
+        if clicked is regenerate:
+            return "rejected"
+        if clicked is later:
+            return "deferred"
+        return "deferred"
 
     def _on_package_ready(self, zip_path: str):
         try:
@@ -387,13 +488,18 @@ class PetLabWindow(QDialog):
                 for package in self.package_manager.list_packages()
             }
             existing = installed.get(inspected.package_id)
-            if existing and not self._confirm_replace(
-                zip_path, inspected, existing
-            ):
+            confirmed = (
+                self._confirm_replace(zip_path, inspected, existing)
+                if existing
+                else self._confirm_install(zip_path, inspected)
+            )
+            if not confirmed:
+                self._record_final_review("deferred")
                 self.progress.setValue(100)
                 self.status.setText(
-                    "孵化结果已保留，但没有覆盖当前已安装角色。"
+                    "最终角色包已保留，但尚未安装。可从未完成任务继续。"
                 )
+                self._refresh_runs(self.active_run_id)
                 return
             self.generated_package = self.package_manager.import_zip(
                 zip_path, replace=existing is not None
@@ -401,6 +507,20 @@ class PetLabWindow(QDialog):
         except CharacterPackageError as exc:
             self._on_error(str(exc))
             return
+        self._record_final_review("accepted")
+        if self.active_run_id:
+            try:
+                self.run_store.update_stage(
+                    self.active_run_id,
+                    "installed",
+                    status="complete",
+                    artifacts={
+                        "installed_package_id":
+                            self.generated_package.package_id
+                    },
+                )
+            except PetGenerationRunError:
+                pass
         self.progress.setValue(100)
         self.status.setText("孵化完成，角色已经安装并设为当前伙伴。")
         QMessageBox.information(
@@ -408,6 +528,21 @@ class PetLabWindow(QDialog):
             f"{self.generated_package.name} 已经来到你的桌面。"
         )
         self.accept()
+
+    def _confirm_install(self, zip_path: str, inspected) -> bool:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("最终预览与安装")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText(f"安装“{inspected.name}”并设为当前伙伴？")
+        dialog.setInformativeText(
+            "这是安装前的最终确认。选择“否”会保留角色包，稍后仍可继续。"
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        self._set_package_preview(dialog, zip_path)
+        return dialog.exec() == QMessageBox.StandardButton.Yes
 
     def _confirm_replace(self, zip_path: str, inspected, existing) -> bool:
         dialog = QMessageBox(self)
@@ -424,6 +559,10 @@ class PetLabWindow(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        self._set_package_preview(dialog, zip_path)
+        return dialog.exec() == QMessageBox.StandardButton.Yes
+
+    def _set_package_preview(self, dialog, zip_path: str):
         try:
             raw = self.package_manager.read_zip_preview(zip_path)
             preview = QPixmap()
@@ -436,17 +575,140 @@ class PetLabWindow(QDialog):
                 ))
         except CharacterPackageError:
             pass
-        return dialog.exec() == QMessageBox.StandardButton.Yes
+
+    def _record_final_review(self, decision: str):
+        if not self.active_run_id:
+            return
+        try:
+            self.run_store.record_review(
+                self.active_run_id, "final_package", decision
+            )
+        except PetGenerationRunError:
+            pass
+
+    def _refresh_runs(self, selected_id=None):
+        self.run_input.blockSignals(True)
+        self.run_input.clear()
+        resumable = [
+            record
+            for record in self.run_store.list_runs()
+            if record["status"] != "complete"
+        ]
+        stage_labels = {
+            "canonical_review": "身份待确认",
+            "action_generation": "动作生成",
+            "final_review": "待安装",
+            "failed": "失败",
+            "canceled": "已取消",
+        }
+        for record in resumable:
+            request = record.get("request", {})
+            name = request.get("pet_name") or record["id"]
+            stage = stage_labels.get(
+                record.get("stage"), record.get("stage", "未完成")
+            )
+            self.run_input.addItem(f"{name} · {stage}", record["id"])
+        if not resumable:
+            self.run_input.addItem("没有未完成任务", None)
+        if selected_id:
+            index = self.run_input.findData(selected_id)
+            if index >= 0:
+                self.run_input.setCurrentIndex(index)
+        self.run_input.blockSignals(False)
+        busy = self.worker is not None and self.worker.isRunning()
+        self.continue_btn.setEnabled(bool(resumable) and not busy)
+        self._on_run_changed()
+
+    def _on_run_changed(self, _index=None):
+        self.retry_task_input.clear()
+        run_id = self.run_input.currentData()
+        if not run_id:
+            self.retry_task_input.addItem("没有可重试动作", None)
+            self.retry_btn.setEnabled(False)
+            return
+        try:
+            record = self.run_store.load(run_id)
+        except PetGenerationRunError:
+            self.retry_btn.setEnabled(False)
+            return
+        for task_id, task in record["tasks"].items():
+            if task["status"] in {"failed", "canceled"}:
+                self.retry_task_input.addItem(
+                    f"{task_id} · {task['status']}", task_id
+                )
+        if self.retry_task_input.count() == 0:
+            self.retry_task_input.addItem("没有可重试动作", None)
+        busy = self.worker is not None and self.worker.isRunning()
+        self.retry_btn.setEnabled(
+            self.retry_task_input.currentData() is not None and not busy
+        )
+
+    def _continue_run(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        run_id = self.run_input.currentData()
+        if not run_id:
+            return
+        try:
+            record = self.run_store.load(run_id)
+            canonical = Path(str(record["artifacts"].get("canonical", "")))
+            if (
+                record.get("stage") == "canonical_review"
+                and canonical.is_file()
+            ):
+                self._on_review_ready(run_id, str(canonical))
+                return
+            if record.get("stage") == "final_review":
+                package = Path(str(record["artifacts"].get("package", "")))
+                if package.is_file():
+                    self.active_run_id = run_id
+                    self._on_package_ready(str(package))
+                    return
+            self._resume_run(run_id)
+        except PetGenerationRunError as exc:
+            self._on_error(str(exc))
+
+    def _retry_selected_task(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        run_id = self.run_input.currentData()
+        task_id = self.retry_task_input.currentData()
+        if run_id and task_id:
+            self._resume_run(run_id, retry_task_id=task_id)
+
+    def _resume_run(self, run_id: str, retry_task_id=None):
+        api_key = self.api_key.text().strip()
+        if not api_key:
+            QMessageBox.warning(
+                self,
+                "需要图像 API Key",
+                "继续生成或重试动作需要图像 API Key。",
+            )
+            return
+        try:
+            worker = PetGenerationWorker.resume_from(
+                run_id=run_id,
+                api_key=api_key,
+                run_store=self.run_store,
+                retry_task_id=retry_task_id,
+            )
+        except PetGenerationRunError as exc:
+            self._on_error(str(exc))
+            return
+        self.active_run_id = run_id
+        self._start_worker(worker)
 
     def _on_worker_finished(self, worker):
-        if self.worker is worker:
+        is_current = self.worker is worker
+        if is_current:
             self.worker = None
         worker.deleteLater()
-        if self._close_after_cancel:
+        if self._close_after_cancel and is_current:
             self._close_after_cancel = False
             QDialog.reject(self)
-        elif self.generated_package is None:
+        elif self.generated_package is None and is_current:
             self.hatch_btn.setDisabled(False)
+            self._refresh_runs(self.active_run_id)
 
     def reject(self):
         if self.worker and self.worker.isRunning():
