@@ -574,6 +574,20 @@ class UiSmokeTests(unittest.TestCase):
         self.assertIsNone(lab.worker)
         self.assertFalse(lab._close_after_cancel)
 
+    def test_pet_lab_ignores_finish_from_superseded_worker(self):
+        lab = PetLabWindow(self.config, self.package_manager)
+        old_worker = MagicMock()
+        current_worker = MagicMock()
+        lab.worker = current_worker
+        lab.hatch_btn.setDisabled(True)
+
+        lab._on_worker_finished(old_worker)
+
+        self.assertIs(lab.worker, current_worker)
+        self.assertFalse(lab.hatch_btn.isEnabled())
+        old_worker.deleteLater.assert_called_once_with()
+        lab.close()
+
     def test_pet_lab_declined_replacement_does_not_import(self):
         manager = MagicMock()
         existing = SimpleNamespace(package_id="same-id", name="旧角色")

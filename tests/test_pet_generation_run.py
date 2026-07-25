@@ -125,6 +125,34 @@ class PetGenerationRunStoreTests(unittest.TestCase):
                     run["id"], "bad", status="unknown"
                 )
 
+    def test_review_decisions_and_single_task_reset_are_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory))
+            run = store.create(
+                run_id="review-run",
+                request={},
+                task_ids=["canonical", "idle"],
+            )
+            store.update_task(
+                run["id"],
+                "idle",
+                "failed",
+                error="temporary failure",
+                increment_attempt=True,
+            )
+            store.record_review(
+                run["id"], "canonical", "accepted", note="identity matches"
+            )
+            reset = store.reset_task(run["id"], "idle")
+
+            self.assertEqual(
+                reset["reviews"]["canonical"]["decision"], "accepted"
+            )
+            self.assertEqual(reset["tasks"]["idle"]["status"], "pending")
+            self.assertEqual(reset["tasks"]["idle"]["attempts"], 1)
+            self.assertIsNone(reset["tasks"]["idle"]["artifact"])
+            self.assertIsNone(reset["tasks"]["idle"]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

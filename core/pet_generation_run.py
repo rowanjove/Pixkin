@@ -79,6 +79,7 @@ class PetGenerationRunStore:
             "request": copy.deepcopy(request),
             "tasks": tasks,
             "artifacts": {},
+            "reviews": {},
             "error": None,
         }
         self._write(record)
@@ -97,6 +98,9 @@ class PetGenerationRunStore:
             raise PetGenerationRunError(
                 f"孵化任务记录无法读取：{run_id}"
             ) from exc
+        # Early v1 manifests did not contain review decisions. Keep them
+        # resumable instead of forcing users to discard generated artwork.
+        record.setdefault("reviews", {})
         self._validate_record(record, run_id)
         return record
 
@@ -132,6 +136,57 @@ class PetGenerationRunStore:
         if artifacts:
             record["artifacts"].update(copy.deepcopy(artifacts))
         record["updated_at"] = _utc_now()
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def update_request(
+        self,
+        run_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        record = self.load(run_id)
+        record["request"].update(copy.deepcopy(updates))
+        record["updated_at"] = _utc_now()
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def record_review(
+        self,
+        run_id: str,
+        review_id: str,
+        decision: str,
+        *,
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        review_id = str(review_id).strip()
+        if not review_id:
+            raise PetGenerationRunError("审核 ID 不能为空。")
+        if decision not in {"accepted", "rejected", "deferred"}:
+            raise PetGenerationRunError(f"不支持的审核决定：{decision}")
+        record = self.load(run_id)
+        now = _utc_now()
+        record["reviews"][review_id] = {
+            "decision": decision,
+            "note": str(note).strip() if note else None,
+            "updated_at": now,
+        }
+        record["updated_at"] = now
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def reset_task(self, run_id: str, task_id: str) -> Dict[str, Any]:
+        """Make one generation task retryable while retaining its history."""
+        record = self.load(run_id)
+        if task_id not in record["tasks"]:
+            raise PetGenerationRunError(f"找不到动作任务：{task_id}")
+        task = record["tasks"][task_id]
+        task["status"] = "pending"
+        task["artifact"] = None
+        task["error"] = None
+        now = _utc_now()
+        task["updated_at"] = now
+        record["updated_at"] = now
+        record["error"] = None
         self._write(record)
         return copy.deepcopy(record)
 
@@ -207,3 +262,5 @@ class PetGenerationRunStore:
             raise PetGenerationRunError("孵化任务列表无效。")
         if not isinstance(record.get("artifacts"), dict):
             raise PetGenerationRunError("孵化产物列表无效。")
+        if not isinstance(record.get("reviews"), dict):
+            raise PetGenerationRunError("孵化审核记录无效。")
