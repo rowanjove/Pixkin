@@ -185,6 +185,14 @@ class UiSmokeTests(unittest.TestCase):
 
         self.assertIn("20 次图像生成", lab.status.text())
         self.assertIn("实际费用", lab.status.text())
+
+        lab.mode_input.setCurrentIndex(
+            lab.mode_input.findData("full")
+        )
+
+        self.assertIn("45 次图像生成", lab.status.text())
+        self.assertIn("四向贴边", lab.status.text())
+        self.assertIn("显著高于", lab.status.text())
         lab.close()
 
     def test_chat_escapes_user_html(self):

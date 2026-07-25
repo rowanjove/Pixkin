@@ -62,10 +62,65 @@ STANDARD_POSES = {
     "happy": "bright joyful pose with a warm smile; no detached effects",
 }
 
+FULL_ONLY_POSES = {
+    "annoyed": (
+        "mildly annoyed but still friendly pose with a tiny pout"
+    ),
+    "walk_left": (
+        "clear side-view walking pose facing left, one foot stepping forward"
+    ),
+    "walk_right": (
+        "clear side-view walking pose facing right, one foot stepping forward"
+    ),
+    "run_left": (
+        "energetic side-view running pose facing left with compact limbs"
+    ),
+    "run_right": (
+        "energetic side-view running pose facing right with compact limbs"
+    ),
+    "jump": "upward jumping pose with both feet visibly off the ground",
+    "land": "soft landing pose with bent knees and a stable low stance",
+    "alerting_important": (
+        "urgent attention pose with both paws raised; no symbols or effects"
+    ),
+    "celebrate_live": (
+        "joyful livestream celebration pose with raised paws; no props"
+    ),
+}
+
+EDGE_SIDES = ("left", "right", "top", "bottom")
+EDGE_PHASES = ("enter", "idle", "hover", "exit")
+_EDGE_SIDE_PROMPTS = {
+    "left": "toward the left screen edge while looking inward to the right",
+    "right": "toward the right screen edge while looking inward to the left",
+    "top": "toward the top screen edge while looking inward and downward",
+    "bottom": "toward the bottom screen edge while looking inward and upward",
+}
+_EDGE_PHASE_PROMPTS = {
+    "enter": "moving into a playful screen-edge hiding position",
+    "idle": "calmly peeking from a screen edge with the face clearly visible",
+    "hover": "leaning farther inward with a curious welcoming expression",
+    "exit": "pulling away from the screen edge back toward the desktop",
+}
+EDGE_POSES = {
+    f"edge_{phase}_{side}": (
+        f"{_EDGE_PHASE_PROMPTS[phase]}, {_EDGE_SIDE_PROMPTS[side]}; "
+        "keep the complete body inside the image"
+    )
+    for phase in EDGE_PHASES
+    for side in EDGE_SIDES
+}
+FULL_POSES = {
+    **STANDARD_POSES,
+    **FULL_ONLY_POSES,
+    **EDGE_POSES,
+}
+
 BASIC_POSE_IDS = ("idle", "talking", "dragging", "alerting")
 STANDARD_POSE_IDS = tuple(STANDARD_POSES)
+FULL_POSE_IDS = tuple(FULL_POSES)
 CORE_REVIEW_POSE_IDS = BASIC_POSE_IDS
-GENERATION_MODES = {"basic", "legacy_full", "standard"}
+GENERATION_MODES = {"basic", "legacy_full", "standard", "full"}
 
 HARD_CARTOON_RULES = """
 NON-NEGOTIABLE OUTPUT RULES — these override every reference and style note:
@@ -149,10 +204,17 @@ class PetGenerationWorker(QThread):
         record = store.load(run_id)
         request = record["request"]
         stored_mode = str(request.get("mode", "draft"))
-        generation_mode = {
-            "draft": "basic",
-            "full": "legacy_full",
-        }.get(stored_mode, stored_mode)
+        if stored_mode == "full":
+            task_ids = set(record.get("tasks") or {})
+            generation_mode = (
+                "full"
+                if set(FULL_POSE_IDS).issubset(task_ids)
+                else "legacy_full"
+            )
+        else:
+            generation_mode = {
+                "draft": "basic",
+            }.get(stored_mode, stored_mode)
         return cls(
             api_key=api_key,
             base_url=str(request.get("image_base_url", "")),
@@ -335,9 +397,12 @@ class PetGenerationWorker(QThread):
             )
             generated = self._completed_images(images_dir, pose_items)
             total = len(pose_items)
+            review_pose_ids = set(CORE_REVIEW_POSE_IDS)
+            if self.generation_mode == "full":
+                review_pose_ids.add("run_right")
             core_items = [
                 item for item in pose_items
-                if item[0] in CORE_REVIEW_POSE_IDS
+                if item[0] in review_pose_ids
             ]
             remaining_items = [
                 item for item in pose_items
@@ -553,6 +618,8 @@ class PetGenerationWorker(QThread):
                 self._client = None
 
     def _pose_items(self):
+        if self.generation_mode == "full":
+            return list(FULL_POSES.items())
         if self.generation_mode == "standard":
             return list(STANDARD_POSES.items())
         if self.generation_mode == "legacy_full":
@@ -921,14 +988,18 @@ class PetGenerationWorker(QThread):
             or "聪明、温暖、友好，回答简洁而有帮助"
         )
         generated_states = set(generated)
-        quality_tier = (
-            "standard"
-            if (
-                self.generation_mode == "standard"
-                and set(STANDARD_POSE_IDS).issubset(generated_states)
-            )
-            else "basic"
-        )
+        if (
+            self.generation_mode == "full"
+            and set(FULL_POSE_IDS).issubset(generated_states)
+        ):
+            quality_tier = "full"
+        elif (
+            self.generation_mode in {"standard", "full"}
+            and set(STANDARD_POSE_IDS).issubset(generated_states)
+        ):
+            quality_tier = "standard"
+        else:
+            quality_tier = "basic"
         metadata = {
             "schema_version": "2.0",
             "id": slug,
@@ -989,6 +1060,30 @@ class PetGenerationWorker(QThread):
                     "stretch": 60,
                 },
             },
+            "edge": (
+                {
+                    "supported_sides": list(EDGE_SIDES),
+                    "default_enabled_sides": ["left", "right", "top"],
+                    "left": {
+                        "peek_anchor": [164, 98],
+                        "hitbox": [132, 56, 60, 84],
+                    },
+                    "right": {
+                        "peek_anchor": [28, 98],
+                        "hitbox": [0, 56, 60, 84],
+                    },
+                    "top": {
+                        "peek_anchor": [96, 172],
+                        "hitbox": [54, 144, 84, 64],
+                    },
+                    "bottom": {
+                        "peek_anchor": [96, 34],
+                        "hitbox": [54, 0, 84, 64],
+                    },
+                }
+                if quality_tier == "full"
+                else {}
+            ),
             "animations": animations,
             "compatibility": {
                 "min_app_version": VERSION,

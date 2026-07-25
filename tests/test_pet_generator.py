@@ -10,6 +10,8 @@ import yaml
 from PIL import Image, ImageDraw
 
 from core.character_package import (
+    EDGE_STATES,
+    FULL_STATES,
     STANDARD_STATES,
     CharacterPackageManager,
 )
@@ -18,9 +20,10 @@ from core.pet_animation_builder import PetAnimationBuilder
 from core.pet_generation_run import PetGenerationRunStore
 from core.pet_generator import (
     BASIC_POSE_IDS,
+    FULL_POSES,
+    FULL_POSE_IDS,
     HARD_CARTOON_RULES,
     POSES,
-    STANDARD_POSES,
     STANDARD_POSE_IDS,
     PetGenerationWorker,
 )
@@ -59,17 +62,40 @@ class PetGeneratorTests(unittest.TestCase):
             full_hatch=True,
         )
 
+    @staticmethod
+    def _write_pose(path: Path, index: int):
+        image = Image.new("RGBA", (192, 208), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (36, 20, 156, 194),
+            radius=28,
+            fill=(
+                80 + (index * 7) % 150,
+                50 + (index * 11) % 120,
+                100 + (index * 13) % 140,
+                255,
+            ),
+        )
+        image.save(path)
+
     def test_every_prompt_keeps_non_negotiable_cartoon_lock(self):
         worker = self._worker("reference.png")
         self.assertIn("never a real person", HARD_CARTOON_RULES)
         self.assertIn(HARD_CARTOON_RULES, worker._base_prompt())
-        for pose in STANDARD_POSES.values():
+        for pose in FULL_POSES.values():
             self.assertIn(HARD_CARTOON_RULES, worker._pose_prompt(pose))
 
     def test_standard_generation_states_match_package_contract(self):
         self.assertEqual(set(STANDARD_POSE_IDS), STANDARD_STATES)
         self.assertEqual(len(STANDARD_POSE_IDS), 19)
         self.assertTrue(set(BASIC_POSE_IDS).issubset(STANDARD_POSE_IDS))
+
+    def test_full_generation_states_match_package_contract(self):
+        required = FULL_STATES | EDGE_STATES
+
+        self.assertEqual(set(FULL_POSE_IDS), required)
+        self.assertEqual(len(FULL_POSE_IDS), 44)
+        self.assertTrue(set(STANDARD_POSE_IDS).issubset(FULL_POSE_IDS))
 
     def test_chroma_background_is_removed(self):
         root = Path(__file__).resolve().parents[1]
@@ -121,19 +147,7 @@ class PetGeneratorTests(unittest.TestCase):
             generated = {}
             for index, state in enumerate(STANDARD_POSE_IDS):
                 target = images / f"{state}.png"
-                image = Image.new("RGBA", (192, 208), (0, 0, 0, 0))
-                draw = ImageDraw.Draw(image)
-                draw.rounded_rectangle(
-                    (36, 20, 156, 194),
-                    radius=28,
-                    fill=(
-                        80 + (index * 7) % 150,
-                        50 + (index * 11) % 120,
-                        100 + (index * 13) % 140,
-                        255,
-                    ),
-                )
-                image.save(target)
+                self._write_pose(target, index)
                 generated[state] = target
             worker = PetGenerationWorker(
                 api_key="test",
@@ -189,6 +203,71 @@ class PetGeneratorTests(unittest.TestCase):
                 inspected.behavior["ambient_weights"],
             )
 
+    def test_full_mode_emits_a_valid_full_tier_package(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            work = base / "full-work"
+            images = work / "images"
+            images.mkdir(parents=True)
+            generated = {}
+            for index, state in enumerate(FULL_POSE_IDS):
+                target = images / f"{state}.png"
+                self._write_pose(target, index)
+                generated[state] = target
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[
+                    root / "assets" / "pixkin" / "pip-avatar.png"
+                ],
+                generation_mode="full",
+            )
+            animation_build = PetAnimationBuilder().build(
+                images=generated,
+                output_dir=images / "frames",
+                preview_dir=work / "previews",
+            )
+            package = worker._package(
+                work,
+                "nova",
+                generated,
+                animation_sequences=animation_build["animations"],
+            )
+            config = ConfigManager(str(base / "config.json"))
+            manager = CharacterPackageManager(
+                config, root=base / "characters"
+            )
+
+            inspected = manager.inspect_zip(str(package))
+
+            self.assertEqual(inspected.quality_tier, "full")
+            self.assertEqual(
+                set(inspected.animations),
+                FULL_STATES | EDGE_STATES,
+            )
+            self.assertEqual(
+                inspected.edge["supported_sides"],
+                ["left", "right", "top", "bottom"],
+            )
+            self.assertEqual(
+                inspected.animations["walk_left"].playback,
+                "loop",
+            )
+            self.assertEqual(
+                inspected.animations["edge_enter_left"].playback,
+                "once",
+            )
+            self.assertEqual(
+                inspected.animations["edge_idle_left"].playback,
+                "loop",
+            )
+
     def test_standard_run_creates_all_tasks_before_first_review(self):
         root = Path(__file__).resolve().parents[1]
         reference = root / "assets" / "pixkin" / "pip-avatar.png"
@@ -223,6 +302,75 @@ class PetGeneratorTests(unittest.TestCase):
                 {"canonical", *STANDARD_POSE_IDS},
             )
             self.assertEqual(run["stage"], "canonical_review")
+
+    def test_full_run_creates_all_tasks_and_resumes_as_full(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[reference],
+                generation_mode="full",
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker,
+                    "_generate",
+                    return_value=self._generated_sprite_bytes(1),
+                ),
+            ):
+                worker.run()
+
+            run = store.list_runs()[0]
+            store.record_review(
+                run["id"], "canonical", "accepted"
+            )
+            resumed = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+            )
+
+            self.assertEqual(run["request"]["mode"], "full")
+            self.assertEqual(
+                set(run["tasks"]),
+                {"canonical", *FULL_POSE_IDS},
+            )
+            self.assertEqual(resumed.generation_mode, "full")
+            self.assertEqual(
+                [state for state, _ in resumed._pose_items()],
+                list(FULL_POSE_IDS),
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    resumed,
+                    "_generate",
+                    return_value=self._generated_sprite_bytes(2),
+                ) as generate,
+            ):
+                resumed.run()
+
+            review = store.load(run["id"])
+            self.assertEqual(generate.call_count, 5)
+            self.assertEqual(review["stage"], "core_review")
+            self.assertEqual(
+                review["tasks"]["run_right"]["status"],
+                "complete",
+            )
+            self.assertEqual(
+                review["tasks"]["run_left"]["status"],
+                "pending",
+            )
 
     def test_legacy_full_mode_resumes_with_only_original_nine_tasks(self):
         root = Path(__file__).resolve().parents[1]
