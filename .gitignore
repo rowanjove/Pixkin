@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+.idea/
+.vscode/
+*.log
+build/
+dist/
+release/
+artifacts/
+.runtime-*/
+config.json
+tmp/
+/*.zip

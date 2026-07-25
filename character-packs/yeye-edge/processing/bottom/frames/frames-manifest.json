@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "chroma_key": {
+    "hex": "#0000FF",
+    "rgb": [
+      0,
+      0,
+      255
+    ],
+    "threshold": 96.0
+  },
+  "rows": [
+    {
+      "state": "idle",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\yeye-edge\\processing\\bottom\\frames\\idle\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\yeye-edge\\processing\\bottom\\frames\\idle\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\yeye-edge\\processing\\bottom\\frames\\idle\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\yeye-edge\\processing\\bottom\\frames\\idle\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\yeye-edge\\processing\\bottom\\frames\\idle\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\yeye-edge\\processing\\bottom\\frames\\idle\\05.png"
+      ],
+      "method": "slots"
+    }
+  ]
+}

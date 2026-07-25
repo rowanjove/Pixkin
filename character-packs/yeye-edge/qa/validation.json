@@ -1,0 +1,68 @@
+{
+  "ok": true,
+  "character": "yeye",
+  "frame_size": [
+    192,
+    208
+  ],
+  "rows": {
+    "left": {
+      "frames": 6,
+      "nontransparent_pixels": [
+        12201,
+        13128,
+        13723,
+        14360,
+        13289,
+        13523
+      ],
+      "vivid_blue_residual_pixels": 1
+    },
+    "right": {
+      "frames": 6,
+      "nontransparent_pixels": [
+        4351,
+        15318,
+        14539,
+        14511,
+        14204,
+        14303
+      ],
+      "vivid_blue_residual_pixels": 1
+    },
+    "top": {
+      "frames": 6,
+      "nontransparent_pixels": [
+        18424,
+        18895,
+        19059,
+        19032,
+        18985,
+        18978
+      ],
+      "vivid_blue_residual_pixels": 6
+    },
+    "bottom": {
+      "frames": 6,
+      "nontransparent_pixels": [
+        9453,
+        11072,
+        21071,
+        21284,
+        21920,
+        21478
+      ],
+      "vivid_blue_residual_pixels": 4
+    }
+  },
+  "errors": [],
+  "warnings": [],
+  "visual_review": {
+    "identity_consistent": true,
+    "left_right_hands_readable": true,
+    "top_is_upside_down": true,
+    "bottom_rises_from_edge": true,
+    "detached_effects": false,
+    "notes": "Reviewed edge-contact-sheet.png; real Qt render is qt-edge-preview.png."
+  }
+}

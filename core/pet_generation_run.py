@@ -1,0 +1,209 @@
+"""Persistent task manifests for resumable Pixkin character generation."""
+
+from __future__ import annotations
+
+import copy
+import json
+import os
+import re
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+from core.paths import user_data_dir
+
+
+RUN_SCHEMA_VERSION = 1
+RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+RUN_STATUSES = {
+    "pending",
+    "running",
+    "needs_review",
+    "complete",
+    "failed",
+    "canceled",
+}
+TASK_STATUSES = {"pending", "running", "complete", "failed", "canceled"}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class PetGenerationRunError(RuntimeError):
+    pass
+
+
+class PetGenerationRunStore:
+    """Owns durable, atomic manifests for Pet Lab generation runs."""
+
+    def __init__(self, root: Optional[Path] = None):
+        self.root = Path(root) if root else user_data_dir() / "pet-lab" / "runs"
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def create(
+        self,
+        *,
+        request: Dict[str, Any],
+        task_ids: Iterable[str],
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        run_id = self._validated_run_id(run_id or uuid.uuid4().hex)
+        now = _utc_now()
+        tasks = {}
+        for task_id in task_ids:
+            task_id = str(task_id).strip()
+            if not task_id or task_id in tasks:
+                raise PetGenerationRunError("孵化任务 ID 不能为空或重复。")
+            tasks[task_id] = {
+                "status": "pending",
+                "attempts": 0,
+                "artifact": None,
+                "error": None,
+                "updated_at": now,
+            }
+        workspace = self.workspace(run_id)
+        if workspace.exists():
+            raise PetGenerationRunError(f"孵化任务已存在：{run_id}")
+        workspace.mkdir(parents=True)
+
+        record = {
+            "schema_version": RUN_SCHEMA_VERSION,
+            "id": run_id,
+            "created_at": now,
+            "updated_at": now,
+            "status": "pending",
+            "stage": "created",
+            "request": copy.deepcopy(request),
+            "tasks": tasks,
+            "artifacts": {},
+            "error": None,
+        }
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def workspace(self, run_id: str) -> Path:
+        return self.root / self._validated_run_id(run_id)
+
+    def load(self, run_id: str) -> Dict[str, Any]:
+        path = self._manifest_path(run_id)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise PetGenerationRunError(f"找不到孵化任务：{run_id}") from exc
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PetGenerationRunError(
+                f"孵化任务记录无法读取：{run_id}"
+            ) from exc
+        self._validate_record(record, run_id)
+        return record
+
+    def list_runs(self) -> List[Dict[str, Any]]:
+        records = []
+        for path in self.root.glob("*/run.json"):
+            try:
+                records.append(self.load(path.parent.name))
+            except PetGenerationRunError:
+                continue
+        return sorted(
+            records,
+            key=lambda item: str(item.get("updated_at", "")),
+            reverse=True,
+        )
+
+    def update_stage(
+        self,
+        run_id: str,
+        stage: str,
+        *,
+        status: Optional[str] = None,
+        error: Optional[str] = None,
+        artifacts: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        record = self.load(run_id)
+        if status is not None:
+            if status not in RUN_STATUSES:
+                raise PetGenerationRunError(f"不支持的孵化状态：{status}")
+            record["status"] = status
+        record["stage"] = str(stage)
+        record["error"] = str(error) if error else None
+        if artifacts:
+            record["artifacts"].update(copy.deepcopy(artifacts))
+        record["updated_at"] = _utc_now()
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def update_task(
+        self,
+        run_id: str,
+        task_id: str,
+        status: str,
+        *,
+        artifact: Optional[str] = None,
+        error: Optional[str] = None,
+        increment_attempt: bool = False,
+    ) -> Dict[str, Any]:
+        if status not in TASK_STATUSES:
+            raise PetGenerationRunError(f"不支持的动作任务状态：{status}")
+        record = self.load(run_id)
+        if task_id not in record["tasks"]:
+            raise PetGenerationRunError(f"找不到动作任务：{task_id}")
+        task = record["tasks"][task_id]
+        task["status"] = status
+        task["artifact"] = str(artifact) if artifact else None
+        task["error"] = str(error) if error else None
+        if increment_attempt:
+            task["attempts"] = int(task.get("attempts", 0)) + 1
+        now = _utc_now()
+        task["updated_at"] = now
+        record["updated_at"] = now
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def _manifest_path(self, run_id: str) -> Path:
+        return self.workspace(run_id) / "run.json"
+
+    def _write(self, record: Dict[str, Any]) -> None:
+        run_id = self._validated_run_id(str(record.get("id", "")))
+        workspace = self.workspace(run_id)
+        workspace.mkdir(parents=True, exist_ok=True)
+        destination = workspace / "run.json"
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".run-",
+            suffix=".tmp",
+            dir=workspace,
+        )
+        temporary_path = Path(temporary)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(record, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, destination)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+    @staticmethod
+    def _validated_run_id(run_id: str) -> str:
+        value = str(run_id)
+        if not RUN_ID_PATTERN.fullmatch(value):
+            raise PetGenerationRunError(f"孵化任务 ID 不安全：{value}")
+        return value
+
+    @staticmethod
+    def _validate_record(record: Dict[str, Any], expected_id: str) -> None:
+        if not isinstance(record, dict):
+            raise PetGenerationRunError("孵化任务记录必须是对象。")
+        if record.get("schema_version") != RUN_SCHEMA_VERSION:
+            raise PetGenerationRunError("不支持的孵化任务记录版本。")
+        if record.get("id") != expected_id:
+            raise PetGenerationRunError("孵化任务 ID 与目录不一致。")
+        if record.get("status") not in RUN_STATUSES:
+            raise PetGenerationRunError("孵化任务状态无效。")
+        if not isinstance(record.get("tasks"), dict):
+            raise PetGenerationRunError("孵化任务列表无效。")
+        if not isinstance(record.get("artifacts"), dict):
+            raise PetGenerationRunError("孵化产物列表无效。")
