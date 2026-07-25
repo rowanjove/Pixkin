@@ -299,6 +299,9 @@ class PetGenerationRunStore:
             "core_qa_report",
             "qa_contact_sheet",
             "qa_report",
+            "static_qa_report",
+            "animation_qa_report",
+            "animation_previews",
             "package",
             "installed_package_id",
         ):

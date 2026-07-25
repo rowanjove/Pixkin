@@ -13,6 +13,8 @@ from openai import OpenAI
 from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from core.pet_animation_builder import PetAnimationBuilder
+from core.pet_animation_qa import PetAnimationQa
 from core.pet_generation_run import PetGenerationRunStore
 from core.pet_generation_qa import PetGenerationQa
 from core.version import VERSION
@@ -229,7 +231,16 @@ class PetGenerationWorker(QThread):
                 qa_report = Path(str(
                     record["artifacts"].get("qa_report", "")
                 ))
-                if package.is_file() and qa_report.is_file():
+                animation_qa_report = Path(str(
+                    record["artifacts"].get(
+                        "animation_qa_report", ""
+                    )
+                ))
+                if (
+                    package.is_file()
+                    and qa_report.is_file()
+                    and animation_qa_report.is_file()
+                ):
                     self.progress_changed.emit(
                         100, "角色包等待最终预览与安装确认。"
                     )
@@ -386,11 +397,72 @@ class PetGenerationWorker(QThread):
                 },
             )
 
+            self.progress_changed.emit(93, "正在生成多帧微动作与循环预览…")
+            animation_build = PetAnimationBuilder().build(
+                images=generated,
+                output_dir=work / "images" / "frames",
+                preview_dir=work / "qa" / "previews",
+            )
+            animation_qa = PetAnimationQa().run(
+                animations=animation_build["animations"],
+                previews=animation_build["previews"],
+                output_dir=work / "qa" / "animation",
+            )
+            if not animation_qa["passed"]:
+                self._run_store.update_stage(
+                    self.run_id,
+                    "qa_review",
+                    status="needs_review",
+                    artifacts={
+                        "qa_contact_sheet":
+                            qa_report["artifacts"]["contact_sheet"],
+                        "qa_report":
+                            animation_qa["artifacts"]["report"],
+                        "static_qa_report":
+                            qa_report["artifacts"]["report"],
+                        "animation_qa_report":
+                            animation_qa["artifacts"]["report"],
+                        "animation_previews": {
+                            state: str(path)
+                            for state, path
+                            in animation_build["previews"].items()
+                        },
+                    },
+                )
+                self.progress_changed.emit(
+                    94, "动画 QA 发现问题，请选择动作返工。"
+                )
+                self.qa_review_ready.emit(
+                    self.run_id,
+                    qa_report["artifacts"]["contact_sheet"],
+                    animation_qa["artifacts"]["report"],
+                )
+                return
+            self._run_store.update_stage(
+                self.run_id,
+                "animation_qa_complete",
+                status="running",
+                artifacts={
+                    "animation_qa_report":
+                        animation_qa["artifacts"]["report"],
+                    "animation_previews": {
+                        state: str(path)
+                        for state, path
+                        in animation_build["previews"].items()
+                    },
+                },
+            )
+
             self.progress_changed.emit(94, "正在组装 Pixkin 角色包…")
             self._run_store.update_stage(
                 self.run_id, "packaging", status="running"
             )
-            zip_path = self._package(work, slug, generated)
+            zip_path = self._package(
+                work,
+                slug,
+                generated,
+                animation_sequences=animation_build["animations"],
+            )
             self._run_store.update_stage(
                 self.run_id,
                 "final_review",
@@ -760,25 +832,44 @@ class PetGenerationWorker(QThread):
         )
         canvas.save(target, "PNG", optimize=True)
 
-    def _package(self, work: Path, slug: str, generated):
-        animations = {
-            state: {
+    def _package(
+        self,
+        work: Path,
+        slug: str,
+        generated,
+        *,
+        animation_sequences=None,
+    ):
+        animation_sequences = animation_sequences or {}
+        animations = {}
+        for state, path in generated.items():
+            sequence = animation_sequences.get(state) or {}
+            frame_paths = sequence.get("frames") or [path]
+            animations[state] = {
                 "source": {
                     "type": "frames",
-                    "files": [f"images/{path.name}"],
+                    "files": [
+                        Path(frame).relative_to(work).as_posix()
+                        for frame in frame_paths
+                    ],
                     "cell_size": [192, 208],
                 },
-                "fps": 8,
-                "playback": (
-                    "loop"
-                    if state in {"idle", "sleep", "talking"}
-                    else "once"
+                "fps": int(sequence.get("fps", 8)),
+                "playback": str(
+                    sequence.get(
+                        "playback",
+                        (
+                            "loop"
+                            if state in {
+                                "idle", "sleep", "talking", "dragging"
+                            }
+                            else "once"
+                        ),
+                    )
                 ),
                 "anchor": [96, 194],
                 "interruptible": state != "dragging",
             }
-            for state, path in generated.items()
-        }
         personality = (
             self.personality
             or "聪明、温暖、友好，回答简洁而有帮助"
@@ -857,6 +948,13 @@ class PetGenerationWorker(QThread):
                 "modification_allowed": True,
                 "commercial_use_allowed": False,
             },
+            "extensions": {
+                "pixkin_pet_lab": {
+                    "animation_source": "procedural_micro_motion",
+                    "key_pose_canvas": [192, 208],
+                    "anchor": [96, 194],
+                },
+            },
         }
         frontmatter = yaml.safe_dump(
             metadata, allow_unicode=True, sort_keys=False
@@ -871,8 +969,11 @@ class PetGenerationWorker(QThread):
             zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9
         ) as archive:
             archive.write(work / "character.md", "character.md")
-            for path in sorted((work / "images").glob("*.png")):
-                archive.write(path, f"images/{path.name}")
+            for path in sorted((work / "images").rglob("*.png")):
+                archive.write(
+                    path,
+                    path.relative_to(work).as_posix(),
+                )
         return zip_path
 
     def _slug(self):
