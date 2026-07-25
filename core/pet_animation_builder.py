@@ -54,6 +54,97 @@ ANIMATION_PROFILES = {
             (1.01, 0.99, 0, 1),
         ),
     },
+    "alerting_important": {
+        "fps": 10,
+        "playback": "once",
+        "transforms": (
+            (1.00, 1.00, 0, 0),
+            (0.99, 1.01, -2, 4),
+            (1.00, 1.00, 0, 7),
+            (0.99, 1.01, 2, 4),
+            (1.01, 0.99, 0, 1),
+        ),
+    },
+    "celebrate_live": {
+        "fps": 10,
+        "playback": "once",
+        "transforms": (
+            (1.00, 1.00, 0, 0),
+            (0.99, 1.01, -2, 5),
+            (1.00, 1.00, 0, 9),
+            (0.99, 1.01, 2, 5),
+            (1.01, 0.99, 0, 1),
+        ),
+    },
+    "walk_left": {
+        "fps": 8,
+        "playback": "loop",
+        "transforms": (
+            (1.00, 1.00, 2, 0),
+            (1.01, 0.99, 1, 2),
+            (1.00, 1.00, 0, 0),
+            (0.99, 1.01, -1, 1),
+            (1.00, 1.00, -2, 0),
+            (1.01, 0.99, 0, 2),
+        ),
+    },
+    "walk_right": {
+        "fps": 8,
+        "playback": "loop",
+        "transforms": (
+            (1.00, 1.00, -2, 0),
+            (1.01, 0.99, -1, 2),
+            (1.00, 1.00, 0, 0),
+            (0.99, 1.01, 1, 1),
+            (1.00, 1.00, 2, 0),
+            (1.01, 0.99, 0, 2),
+        ),
+    },
+    "run_left": {
+        "fps": 11,
+        "playback": "loop",
+        "transforms": (
+            (1.00, 1.00, 4, 0),
+            (1.02, 0.98, 2, 3),
+            (1.00, 1.00, 0, 1),
+            (0.98, 1.02, -2, 3),
+            (1.00, 1.00, -4, 0),
+            (1.02, 0.98, 0, 3),
+        ),
+    },
+    "run_right": {
+        "fps": 11,
+        "playback": "loop",
+        "transforms": (
+            (1.00, 1.00, -4, 0),
+            (1.02, 0.98, -2, 3),
+            (1.00, 1.00, 0, 1),
+            (0.98, 1.02, 2, 3),
+            (1.00, 1.00, 4, 0),
+            (1.02, 0.98, 0, 3),
+        ),
+    },
+    "jump": {
+        "fps": 10,
+        "playback": "once",
+        "transforms": (
+            (1.02, 0.98, 0, 0),
+            (1.00, 1.00, -1, 6),
+            (0.99, 1.01, 0, 12),
+            (1.00, 1.00, 1, 6),
+            (1.02, 0.98, 0, 1),
+        ),
+    },
+    "land": {
+        "fps": 10,
+        "playback": "once",
+        "transforms": (
+            (1.00, 1.00, 0, 5),
+            (1.03, 0.97, 0, 0),
+            (1.01, 0.99, 0, 1),
+            (1.00, 1.00, 0, 0),
+        ),
+    },
 }
 
 DEFAULT_PROFILE = {
@@ -76,7 +167,54 @@ LOOP_STATES = {
     "thinking",
     "working",
     "waiting",
+    "walk_left",
+    "walk_right",
+    "run_left",
+    "run_right",
+    *{
+        f"edge_{phase}_{side}"
+        for phase in ("idle", "hover")
+        for side in ("left", "right", "top", "bottom")
+    },
 }
+
+
+def _edge_profile(state: str):
+    parts = state.split("_")
+    if len(parts) != 3 or parts[0] != "edge":
+        return None
+    _, phase, side = parts
+    phase_amounts = {
+        "enter": (8, 5, 2, 0),
+        "idle": (1, 0, 1, 0),
+        "hover": (0, -2, -4, -2),
+        "exit": (0, 2, 5, 8),
+    }
+    amounts = phase_amounts.get(phase)
+    if amounts is None or side not in {"left", "right", "top", "bottom"}:
+        return None
+    scales = (
+        (1.00, 1.00),
+        (1.01, 0.99),
+        (1.00, 1.00),
+        (0.99, 1.01),
+    )
+    transforms = []
+    for amount, (scale_x, scale_y) in zip(amounts, scales):
+        if side == "left":
+            offset_x, lift = -amount, 0
+        elif side == "right":
+            offset_x, lift = amount, 0
+        elif side == "top":
+            offset_x, lift = 0, amount
+        else:
+            offset_x, lift = 0, -amount
+        transforms.append((scale_x, scale_y, offset_x, lift))
+    return {
+        "fps": 8,
+        "playback": "loop" if phase in {"idle", "hover"} else "once",
+        "transforms": tuple(transforms),
+    }
 
 
 class PetAnimationBuilder:
@@ -96,9 +234,10 @@ class PetAnimationBuilder:
         animations = {}
         previews = {}
         for state, source_path in images.items():
-            profile = dict(ANIMATION_PROFILES.get(
-                state, DEFAULT_PROFILE
-            ))
+            profile = dict(
+                _edge_profile(state)
+                or ANIMATION_PROFILES.get(state, DEFAULT_PROFILE)
+            )
             if state in LOOP_STATES:
                 profile["playback"] = "loop"
             state_dir = output_dir / state

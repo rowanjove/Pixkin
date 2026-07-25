@@ -241,6 +241,9 @@ class PetLabWindow(QDialog):
         self.mode_input.addItem(
             "标准孵化 · 19 状态 / 20 次生成", "standard"
         )
+        self.mode_input.addItem(
+            "完整孵化 · 44 状态 / 45 次生成", "full"
+        )
         form.addRow("角色名字", self.name_input)
         form.addRow("性格设定", self.personality_input)
         form.addRow("风格补充", self.style_input)
@@ -434,7 +437,13 @@ class PetLabWindow(QDialog):
 
     def _update_mode_hint(self, _index=None):
         mode = self.mode_input.currentData()
-        if mode == "standard":
+        if mode == "full":
+            self.status.setText(
+                "完整孵化包含 1 张身份稿和 44 个状态，共 45 次图像生成，"
+                "含移动、跳跃、高级反馈与四向贴边；成本和耗时显著高于标准模式，"
+                "实际数值由所选接口、模型与质量决定。"
+            )
+        elif mode == "standard":
             self.status.setText(
                 "标准孵化包含 1 张身份稿和 19 个状态，共 20 次图像生成；"
                 "实际费用和耗时由所选接口、模型与质量决定。"
@@ -544,8 +553,16 @@ class PetLabWindow(QDialog):
         report_path: str,
     ):
         self.active_run_id = run_id
+        try:
+            mode = self.run_store.load(run_id)["request"].get("mode")
+        except PetGenerationRunError:
+            mode = None
         result = self._confirm_action_review(
-            title="审核核心动作一致性",
+            title=(
+                "审核核心动作与右向步态"
+                if mode == "full"
+                else "审核核心动作一致性"
+            ),
             sheet_path=sheet_path,
             report_path=report_path,
             allow_accept=True,
