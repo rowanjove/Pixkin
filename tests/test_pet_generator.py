@@ -186,11 +186,12 @@ class PetGeneratorTests(unittest.TestCase):
             )
             finalized = PetGenerationWorker.resume_from(
                 run_id=runs[0]["id"],
-                api_key="test",
+                api_key="",
                 run_store=store,
             )
-            with patch("core.pet_generator.OpenAI"):
+            with patch("core.pet_generator.OpenAI") as openai:
                 finalized.run()
+            openai.assert_not_called()
 
             ready = store.load(runs[0]["id"])
             self.assertEqual(ready["status"], "needs_review")
@@ -316,6 +317,146 @@ class PetGeneratorTests(unittest.TestCase):
             self.assertEqual(record["tasks"]["idle"]["status"], "complete")
             self.assertEqual(record["tasks"]["idle"]["attempts"], 2)
             self.assertEqual(record["tasks"]["talking"]["status"], "pending")
+
+    def test_regeneration_preserves_raw_and_normalized_candidates(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            first_raw = self._generated_sprite_bytes(1)
+            second_raw = self._generated_sprite_bytes(2)
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="https://api.openai.com/v1",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[reference],
+                full_hatch=False,
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker, "_generate", return_value=first_raw
+                ),
+            ):
+                worker.run()
+            run = store.list_runs()[0]
+            first_task = run["tasks"]["canonical"]
+            self.assertEqual(
+                first_task["selected_candidate"], "attempt-001"
+            )
+            first_candidate = first_task["candidates"][0]
+            self.assertEqual(
+                store.artifact_path(
+                    run["id"], first_candidate["source_artifact"]
+                ).read_bytes(),
+                first_raw,
+            )
+
+            regenerated = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+                retry_task_id="canonical",
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    regenerated, "_generate", return_value=second_raw
+                ),
+            ):
+                regenerated.run()
+
+            task = store.load(run["id"])["tasks"]["canonical"]
+            self.assertEqual(
+                [item["id"] for item in task["candidates"]],
+                ["attempt-001", "attempt-002"],
+            )
+            self.assertEqual(task["selected_candidate"], "attempt-002")
+            for candidate in task["candidates"]:
+                self.assertTrue(
+                    store.artifact_path(
+                        run["id"], candidate["source_artifact"]
+                    ).is_file()
+                )
+                self.assertTrue(
+                    store.artifact_path(
+                        run["id"], candidate["sprite_artifact"]
+                    ).is_file()
+                )
+            active = store.workspace(run["id"]) / "images/canonical.png"
+            selected = store.artifact_path(
+                run["id"], task["candidates"][1]["sprite_artifact"]
+            )
+            self.assertEqual(active.read_bytes(), selected.read_bytes())
+
+    def test_first_retry_of_legacy_run_archives_existing_sprite(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[reference],
+                full_hatch=False,
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker,
+                    "_generate",
+                    return_value=self._generated_sprite_bytes(1),
+                ),
+            ):
+                worker.run()
+            run = store.list_runs()[0]
+            manifest = store.workspace(run["id"]) / "run.json"
+            legacy = json.loads(manifest.read_text(encoding="utf-8"))
+            legacy_task = legacy["tasks"]["canonical"]
+            legacy_task.pop("candidates", None)
+            legacy_task.pop("selected_candidate", None)
+            manifest.write_text(
+                json.dumps(legacy, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            retried = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+                retry_task_id="canonical",
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    retried,
+                    "_generate",
+                    return_value=self._generated_sprite_bytes(2),
+                ),
+            ):
+                retried.run()
+
+            task = store.load(run["id"])["tasks"]["canonical"]
+            self.assertEqual(
+                [item["id"] for item in task["candidates"]],
+                ["legacy-001", "attempt-002"],
+            )
+            self.assertTrue(
+                task["candidates"][0]["metadata"][
+                    "migrated_from_active_artifact"
+                ]
+            )
 
     def test_full_hatch_pauses_after_core_actions_before_remaining_poses(self):
         root = Path(__file__).resolve().parents[1]

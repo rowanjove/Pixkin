@@ -153,6 +153,125 @@ class PetGenerationRunStoreTests(unittest.TestCase):
             self.assertIsNone(reset["tasks"]["idle"]["artifact"])
             self.assertIsNone(reset["tasks"]["idle"]["error"])
 
+    def test_candidates_are_append_only_and_can_be_reselected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory))
+            run = store.create(
+                run_id="candidate-run",
+                request={},
+                task_ids=["idle"],
+            )
+            store.record_candidate(
+                run["id"],
+                "idle",
+                candidate_id="attempt-001",
+                source_artifact=(
+                    "candidates/idle/attempt-001/source.png"
+                ),
+                sprite_artifact=(
+                    "candidates/idle/attempt-001/sprite.png"
+                ),
+                metadata={"model": "test-image"},
+            )
+            store.record_candidate(
+                run["id"],
+                "idle",
+                candidate_id="attempt-002",
+                source_artifact=(
+                    "candidates/idle/attempt-002/source.png"
+                ),
+                sprite_artifact=(
+                    "candidates/idle/attempt-002/sprite.png"
+                ),
+            )
+            selected = store.select_candidate(
+                run["id"],
+                "idle",
+                "attempt-001",
+                active_artifact="images/idle.png",
+            )
+
+            task = selected["tasks"]["idle"]
+            self.assertEqual(len(task["candidates"]), 2)
+            self.assertEqual(task["selected_candidate"], "attempt-001")
+            self.assertEqual(task["status"], "complete")
+            self.assertEqual(task["artifact"], "images/idle.png")
+            self.assertEqual(
+                task["candidates"][0]["metadata"]["model"], "test-image"
+            )
+
+            with self.assertRaises(PetGenerationRunError):
+                store.record_candidate(
+                    run["id"],
+                    "idle",
+                    candidate_id="../unsafe",
+                    source_artifact="source.png",
+                    sprite_artifact="sprite.png",
+                )
+
+    def test_selecting_canonical_invalidates_downstream_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory))
+            run = store.create(
+                run_id="identity-switch",
+                request={},
+                task_ids=["canonical", "idle", "talking"],
+            )
+            store.record_candidate(
+                run["id"],
+                "canonical",
+                candidate_id="attempt-001",
+                source_artifact=(
+                    "candidates/canonical/attempt-001/source.png"
+                ),
+                sprite_artifact=(
+                    "candidates/canonical/attempt-001/sprite.png"
+                ),
+            )
+            for task_id in ("canonical", "idle", "talking"):
+                store.update_task(
+                    run["id"],
+                    task_id,
+                    "complete",
+                    artifact=f"images/{task_id}.png",
+                )
+            store.record_review(
+                run["id"], "canonical", "accepted"
+            )
+            store.record_review(
+                run["id"], "core_actions", "accepted"
+            )
+            store.update_stage(
+                run["id"],
+                "final_review",
+                status="needs_review",
+                artifacts={
+                    "package": "identity-switch.zip",
+                    "qa_report": "qa/final/report.json",
+                },
+            )
+
+            invalidated = store.invalidate_after_candidate_selection(
+                run["id"],
+                "canonical",
+                core_task_ids=("idle", "talking"),
+            )
+
+            self.assertEqual(invalidated["stage"], "canonical_review")
+            self.assertEqual(invalidated["status"], "needs_review")
+            self.assertNotIn("canonical", invalidated["reviews"])
+            self.assertNotIn("core_actions", invalidated["reviews"])
+            self.assertNotIn("package", invalidated["artifacts"])
+            self.assertEqual(
+                invalidated["tasks"]["canonical"]["status"], "complete"
+            )
+            self.assertEqual(
+                invalidated["tasks"]["idle"]["status"], "pending"
+            )
+            self.assertIsNone(
+                invalidated["tasks"]["talking"]["artifact"]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

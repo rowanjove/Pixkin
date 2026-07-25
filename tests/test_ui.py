@@ -13,7 +13,9 @@ from PIL import Image
 from PyQt6.QtCore import Qt, QPointF, QEvent, QObject
 from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import (
+    QApplication, QDialog, QListWidget, QMessageBox
+)
 
 from core.character_package import (
     AnimationSpec, CharacterPackage, CharacterPackageManager, FrameSpec
@@ -631,6 +633,77 @@ class UiSmokeTests(unittest.TestCase):
 
             dialog.setIconPixmap.assert_called_once()
             manager.read_zip_preview.assert_not_called()
+            lab.close()
+
+    def test_pet_lab_can_switch_to_an_archived_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            store = PetGenerationRunStore(base / "runs")
+            run = store.create(
+                run_id="candidate-ui",
+                request={"pet_name": "Nova"},
+                task_ids=["idle"],
+            )
+            workspace = store.workspace(run["id"])
+            colors = ((180, 70, 120, 255), (70, 100, 190, 255))
+            for index, color in enumerate(colors, start=1):
+                candidate_id = f"attempt-{index:03d}"
+                candidate_dir = (
+                    workspace / "candidates" / "idle" / candidate_id
+                )
+                candidate_dir.mkdir(parents=True)
+                source = candidate_dir / "source.png"
+                sprite = candidate_dir / "sprite.png"
+                Image.new("RGBA", (192, 208), color).save(source)
+                Image.new("RGBA", (192, 208), color).save(sprite)
+                store.record_candidate(
+                    run["id"],
+                    "idle",
+                    candidate_id=candidate_id,
+                    source_artifact=source.relative_to(
+                        workspace
+                    ).as_posix(),
+                    sprite_artifact=sprite.relative_to(
+                        workspace
+                    ).as_posix(),
+                )
+            active = workspace / "images" / "idle.png"
+            active.parent.mkdir()
+            shutil.copy2(
+                workspace
+                / "candidates/idle/attempt-002/sprite.png",
+                active,
+            )
+            store.select_candidate(
+                run["id"],
+                "idle",
+                "attempt-002",
+                active_artifact="images/idle.png",
+            )
+            lab = PetLabWindow(
+                self.config, self.package_manager, run_store=store
+            )
+
+            def choose_first(dialog):
+                candidates = dialog.findChild(QListWidget)
+                candidates.setCurrentRow(0)
+                return QDialog.DialogCode.Accepted
+
+            with patch.object(QDialog, "exec", choose_first):
+                switched = lab._choose_candidate_version(
+                    run["id"], "idle", continue_flow=False
+                )
+
+            self.assertTrue(switched)
+            task = store.load(run["id"])["tasks"]["idle"]
+            self.assertEqual(
+                task["selected_candidate"], "attempt-001"
+            )
+            first = (
+                workspace
+                / "candidates/idle/attempt-001/sprite.png"
+            )
+            self.assertEqual(active.read_bytes(), first.read_bytes())
             lab.close()
 
     def test_pet_lab_declined_replacement_does_not_import(self):
