@@ -5,10 +5,10 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QIcon, QMovie, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
-    QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QInputDialog,
-    QProgressBar, QPushButton, QTextEdit, QVBoxLayout,
+    QProgressBar, QPushButton, QSpinBox, QTextEdit, QVBoxLayout,
 )
 
 from core.character_package import CharacterPackageError, CharacterPackageManager
@@ -244,10 +244,25 @@ class PetLabWindow(QDialog):
         self.mode_input.addItem(
             "完整孵化 · 44 状态 / 45 次生成", "full"
         )
+        self.symmetry_input = QCheckBox(
+            "角色左右完全对称，允许安全镜像左右动作"
+        )
+        self.symmetry_input.setToolTip(
+            "仅在角色没有单侧配饰、文字、徽标、道具或不对称光照时启用；"
+            "完整模式可少调用 6 次图像 API。"
+        )
+        self.call_budget_input = QSpinBox()
+        self.call_budget_input.setRange(5, 100)
+        self.call_budget_input.setSuffix(" 次")
+        self.call_budget_input.setToolTip(
+            "达到上限后任务会安全停止；初始计划之外的额度用于返工。"
+        )
         form.addRow("角色名字", self.name_input)
         form.addRow("性格设定", self.personality_input)
         form.addRow("风格补充", self.style_input)
         form.addRow("孵化模式", self.mode_input)
+        form.addRow("镜像优化", self.symmetry_input)
+        form.addRow("最大 API 调用", self.call_budget_input)
         layout.addLayout(form)
 
         settings = self.config_manager.get("image_generation", {})
@@ -278,6 +293,9 @@ class PetLabWindow(QDialog):
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
         self.mode_input.currentIndexChanged.connect(
+            self._update_mode_hint
+        )
+        self.symmetry_input.stateChanged.connect(
             self._update_mode_hint
         )
         self._update_mode_hint()
@@ -366,6 +384,29 @@ class PetLabWindow(QDialog):
             )
             return
 
+        mode = self.mode_input.currentData()
+        allow_mirror = bool(
+            mode == "full" and self.symmetry_input.isChecked()
+        )
+        planned_calls = PetGenerationWorker.planned_api_calls(
+            mode,
+            allow_mirror,
+        )
+        budget = self.call_budget_input.value()
+        answer = QMessageBox.question(
+            self,
+            "确认图像调用预算",
+            f"本次计划调用 {planned_calls} 次图像 API，"
+            f"最大预算为 {budget} 次。\n"
+            "身份稿确认后才会继续生成动作；达到预算时任务会安全停止。"
+            "\n确认开始吗？",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
         previous_api_key = SecretStore.get_image_api_key()
         saved = SecretStore.set_image_api_key(api_key)
         if not saved and previous_api_key and previous_api_key != api_key:
@@ -408,7 +449,9 @@ class PetLabWindow(QDialog):
             style_notes=self.style_input.toPlainText().strip(),
             reference_paths=self.reference_paths,
             full_hatch=self.mode_input.currentData() != "basic",
-            generation_mode=self.mode_input.currentData(),
+            generation_mode=mode,
+            allow_horizontal_mirror=allow_mirror,
+            max_api_calls=budget,
             run_store=self.run_store,
         )
         self._start_worker(worker)
@@ -437,9 +480,32 @@ class PetLabWindow(QDialog):
 
     def _update_mode_hint(self, _index=None):
         mode = self.mode_input.currentData()
+        is_full = mode == "full"
+        self.symmetry_input.setEnabled(is_full)
+        if not is_full and self.symmetry_input.isChecked():
+            self.symmetry_input.blockSignals(True)
+            self.symmetry_input.setChecked(False)
+            self.symmetry_input.blockSignals(False)
+        allow_mirror = bool(
+            is_full and self.symmetry_input.isChecked()
+        )
+        planned_calls = PetGenerationWorker.planned_api_calls(
+            mode,
+            allow_mirror,
+        )
+        self.call_budget_input.blockSignals(True)
+        self.call_budget_input.setMinimum(planned_calls)
+        self.call_budget_input.setValue(min(100, planned_calls + 3))
+        self.call_budget_input.blockSignals(False)
         if mode == "full":
+            mirror_copy = (
+                "已启用安全镜像，计划 39 次图像生成"
+                if allow_mirror
+                else "默认不镜像，计划 45 次图像生成"
+            )
             self.status.setText(
-                "完整孵化包含 1 张身份稿和 44 个状态，共 45 次图像生成，"
+                "完整孵化包含 1 张身份稿和 44 个状态；"
+                f"{mirror_copy}，"
                 "含移动、跳跃、高级反馈与四向贴边；成本和耗时显著高于标准模式，"
                 "实际数值由所选接口、模型与质量决定。"
             )
@@ -983,7 +1049,17 @@ class PetLabWindow(QDialog):
             stage = stage_labels.get(
                 record.get("stage"), record.get("stage", "未完成")
             )
-            self.run_input.addItem(f"{name} · {stage}", record["id"])
+            used = PetGenerationWorker.api_calls_used(record)
+            budget = request.get("max_api_calls")
+            usage = (
+                f"{used}/{int(budget)}"
+                if budget is not None
+                else str(used)
+            )
+            self.run_input.addItem(
+                f"{name} · {stage} · API {usage}",
+                record["id"],
+            )
         if not resumable:
             self.run_input.addItem("没有未完成任务", None)
         if selected_id:
@@ -1176,13 +1252,27 @@ class PetLabWindow(QDialog):
             candidate_id,
             active_artifact=active_artifact,
         )
+        core_task_ids = [
+            "idle", "talking", "dragging", "alerting"
+        ]
+        if record.get("request", {}).get("mode") == "full":
+            core_task_ids.append("run_right")
         self.run_store.invalidate_after_candidate_selection(
             run_id,
             task_id,
-            core_task_ids=(
-                "idle", "talking", "dragging", "alerting"
-            ),
+            core_task_ids=core_task_ids,
         )
+        if (
+            task_id != "canonical"
+            and record.get("request", {}).get(
+                "allow_horizontal_mirror", False
+            )
+        ):
+            for dependent in PetGenerationWorker.mirror_dependents(
+                task_id
+            ):
+                if dependent in record["tasks"]:
+                    self.run_store.reset_task(run_id, dependent)
         self.active_run_id = run_id
         self.status.setText(
             f"已切换 {task_id} 到 {candidate_id}，"
@@ -1314,6 +1404,25 @@ class PetLabWindow(QDialog):
                 "继续生成或重试动作需要图像 API Key。",
             )
             return
+        budget = record.get("request", {}).get("max_api_calls")
+        used = PetGenerationWorker.api_calls_used(record)
+        if needs_generation and budget is not None and used >= int(budget):
+            increased, confirmed = QInputDialog.getInt(
+                self,
+                "提高图像调用预算",
+                f"当前已使用 {used}/{int(budget)} 次。"
+                "继续生成至少需要再增加 1 次预算：",
+                min(1000, used + 3),
+                used + 1,
+                1000,
+                1,
+            )
+            if not confirmed:
+                return
+            self.run_store.update_request(
+                run_id,
+                {"max_api_calls": increased},
+            )
         try:
             worker = PetGenerationWorker.resume_from(
                 run_id=run_id,

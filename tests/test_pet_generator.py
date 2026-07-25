@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 
 from core.character_package import (
     EDGE_STATES,
@@ -44,6 +44,25 @@ class PetGeneratorTests(unittest.TestCase):
             fill=color,
             outline=(30, 35, 55),
             width=14,
+        )
+        output = io.BytesIO()
+        image.save(output, "PNG")
+        return output.getvalue()
+
+    @staticmethod
+    def _asymmetric_sprite_bytes(index):
+        image = Image.new("RGB", (512, 512), (0, 255, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (105, 90, 330, 430),
+            radius=65,
+            fill=(90 + index * 20, 70, 175),
+            outline=(25, 30, 50),
+            width=14,
+        )
+        draw.ellipse(
+            (120, 145, 175, 200),
+            fill=(245, 190, 70),
         )
         output = io.BytesIO()
         image.save(output, "PNG")
@@ -96,6 +115,24 @@ class PetGeneratorTests(unittest.TestCase):
         self.assertEqual(set(FULL_POSE_IDS), required)
         self.assertEqual(len(FULL_POSE_IDS), 44)
         self.assertTrue(set(STANDARD_POSE_IDS).issubset(FULL_POSE_IDS))
+
+    def test_generation_plan_counts_budget_and_mirror_savings(self):
+        self.assertEqual(
+            PetGenerationWorker.planned_api_calls("basic"),
+            5,
+        )
+        self.assertEqual(
+            PetGenerationWorker.planned_api_calls("standard"),
+            20,
+        )
+        self.assertEqual(
+            PetGenerationWorker.planned_api_calls("full"),
+            45,
+        )
+        self.assertEqual(
+            PetGenerationWorker.planned_api_calls("full", True),
+            39,
+        )
 
     def test_chroma_background_is_removed(self):
         root = Path(__file__).resolve().parents[1]
@@ -370,6 +407,182 @@ class PetGeneratorTests(unittest.TestCase):
             self.assertEqual(
                 review["tasks"]["run_left"]["status"],
                 "pending",
+            )
+
+    def test_api_budget_stops_before_an_unapproved_call(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[reference],
+                generation_mode="basic",
+                max_api_calls=1,
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker,
+                    "_generate",
+                    return_value=self._generated_sprite_bytes(1),
+                ),
+            ):
+                worker.run()
+            run = store.list_runs()[0]
+            store.record_review(
+                run["id"], "canonical", "accepted"
+            )
+            resumed = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+            )
+            errors = []
+            resumed.error_occurred.connect(errors.append)
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(resumed, "_generate") as generate,
+            ):
+                resumed.run()
+
+            stopped = store.load(run["id"])
+            generate.assert_not_called()
+            self.assertEqual(
+                PetGenerationWorker.api_calls_used(stopped),
+                1,
+            )
+            self.assertEqual(stopped["tasks"]["idle"]["attempts"], 0)
+            self.assertEqual(stopped["stage"], "failed")
+            self.assertIn("预算已用尽", errors[0])
+
+    def test_declared_symmetry_mirrors_without_spending_api_calls(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            store = PetGenerationRunStore(base / "runs")
+            run = store.create(
+                run_id="mirror-run",
+                request={
+                    "mode": "full",
+                    "allow_horizontal_mirror": True,
+                    "max_api_calls": 10,
+                },
+                task_ids=["walk_right", "walk_left"],
+            )
+            images = store.workspace(run["id"]) / "images"
+            images.mkdir()
+            canonical = images / "canonical.png"
+            PetGenerationWorker._save_sprite(
+                self._asymmetric_sprite_bytes(0),
+                canonical,
+            )
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[reference],
+                generation_mode="full",
+                allow_horizontal_mirror=True,
+                max_api_calls=10,
+                run_id=run["id"],
+                run_store=store,
+            )
+            pose_items = [
+                ("walk_right", FULL_POSES["walk_right"]),
+                ("walk_left", FULL_POSES["walk_left"]),
+            ]
+            generated = {}
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker,
+                    "_generate",
+                    return_value=self._asymmetric_sprite_bytes(1),
+                ) as generate,
+            ):
+                worker._generate_pose_group(
+                    canonical=canonical,
+                    images_dir=images,
+                    pose_items=pose_items,
+                    generated=generated,
+                    all_pose_items=pose_items,
+                )
+
+            record = store.load(run["id"])
+            self.assertEqual(generate.call_count, 1)
+            self.assertEqual(
+                PetGenerationWorker.api_calls_used(record),
+                1,
+            )
+            self.assertEqual(
+                record["tasks"]["walk_left"]["attempts"],
+                0,
+            )
+            mirror = record["tasks"]["walk_left"]["candidates"][0]
+            self.assertEqual(
+                mirror["metadata"]["mirror_of"],
+                "walk_right",
+            )
+            with Image.open(images / "walk_right.png") as right:
+                expected = ImageOps.mirror(right.convert("RGBA"))
+            with Image.open(images / "walk_left.png") as left:
+                difference = ImageChops.difference(
+                    expected,
+                    left.convert("RGBA"),
+                )
+            self.assertIsNone(difference.getbbox())
+
+            worker.retry_task_id = "walk_right"
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker,
+                    "_generate",
+                    return_value=self._asymmetric_sprite_bytes(2),
+                ),
+            ):
+                worker._generate_pose_group(
+                    canonical=canonical,
+                    images_dir=images,
+                    pose_items=pose_items[:1],
+                    generated=generated,
+                    all_pose_items=pose_items,
+                )
+            invalidated = store.load(run["id"])
+            self.assertEqual(
+                invalidated["tasks"]["walk_left"]["status"],
+                "pending",
+            )
+
+            worker.retry_task_id = None
+            worker._generate_pose_group(
+                canonical=canonical,
+                images_dir=images,
+                pose_items=pose_items[1:],
+                generated=generated,
+                all_pose_items=pose_items,
+            )
+            refreshed = store.load(run["id"])
+            self.assertEqual(
+                refreshed["tasks"]["walk_left"]["selected_candidate"],
+                "mirror-002",
+            )
+            self.assertEqual(
+                PetGenerationWorker.api_calls_used(refreshed),
+                2,
             )
 
     def test_legacy_full_mode_resumes_with_only_original_nine_tasks(self):
