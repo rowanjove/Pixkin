@@ -468,6 +468,18 @@ class PetGeneratorTests(unittest.TestCase):
             self.assertEqual(stopped["tasks"]["idle"]["attempts"], 0)
             self.assertEqual(stopped["stage"], "failed")
             self.assertIn("预算已用尽", errors[0])
+            diagnostic = Path(
+                stopped["artifacts"][
+                    "generation_diagnostic_report"
+                ]
+            )
+            self.assertTrue(diagnostic.is_file())
+            self.assertEqual(
+                json.loads(diagnostic.read_text(encoding="utf-8"))[
+                    "health"
+                ],
+                "blocked",
+            )
 
     def test_transient_error_retries_with_budgeted_backoff_and_timing(self):
         root = Path(__file__).resolve().parents[1]

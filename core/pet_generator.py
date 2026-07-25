@@ -18,6 +18,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.pet_animation_builder import LOOP_STATES, PetAnimationBuilder
 from core.pet_animation_qa import PetAnimationQa
+from core.pet_generation_diagnostics import PetGenerationDiagnostics
 from core.pet_generation_run import PetGenerationRunStore
 from core.pet_generation_qa import PetGenerationQa
 from core.version import VERSION
@@ -652,6 +653,16 @@ class PetGenerationWorker(QThread):
                         "qa_report": qa_report["artifacts"]["report"],
                     },
                 )
+                diagnostic_report = self._persist_diagnostic_report()
+                self._run_store.update_stage(
+                    self.run_id,
+                    "qa_review",
+                    status="needs_review",
+                    artifacts={
+                        "generation_diagnostic_report":
+                            diagnostic_report,
+                    },
+                )
                 self.progress_changed.emit(
                     94, "自动 QA 发现问题，请选择动作返工。"
                 )
@@ -704,6 +715,16 @@ class PetGenerationWorker(QThread):
                         },
                     },
                 )
+                diagnostic_report = self._persist_diagnostic_report()
+                self._run_store.update_stage(
+                    self.run_id,
+                    "qa_review",
+                    status="needs_review",
+                    artifacts={
+                        "generation_diagnostic_report":
+                            diagnostic_report,
+                    },
+                )
                 self.progress_changed.emit(
                     94, "动画 QA 发现问题，请选择动作返工。"
                 )
@@ -744,6 +765,16 @@ class PetGenerationWorker(QThread):
                 status="needs_review",
                 artifacts={"package": str(zip_path)},
             )
+            diagnostic_report = self._persist_diagnostic_report()
+            self._run_store.update_stage(
+                self.run_id,
+                "final_review",
+                status="needs_review",
+                artifacts={
+                    "generation_diagnostic_report":
+                        diagnostic_report,
+                },
+            )
             self.progress_changed.emit(
                 100, "角色包已完成，请最终预览并确认安装。"
             )
@@ -767,6 +798,19 @@ class PetGenerationWorker(QThread):
                             status="failed",
                             error=str(exc),
                         )
+                        diagnostic_report = (
+                            self._persist_diagnostic_report()
+                        )
+                        self._run_store.update_stage(
+                            self.run_id,
+                            "failed",
+                            status="failed",
+                            error=str(exc),
+                            artifacts={
+                                "generation_diagnostic_report":
+                                    diagnostic_report,
+                            },
+                        )
                 except Exception:
                     pass
             if not self.isInterruptionRequested():
@@ -787,6 +831,19 @@ class PetGenerationWorker(QThread):
         if self.generation_mode == "legacy_full":
             return list(POSES.items())
         return [(state, POSES[state]) for state in BASIC_POSE_IDS]
+
+    def _persist_diagnostic_report(self):
+        destination = (
+            self._run_store.workspace(self.run_id)
+            / "qa"
+            / "diagnostics"
+            / "generation-diagnostic.json"
+        )
+        PetGenerationDiagnostics.write(
+            self._run_store.load(self.run_id),
+            destination,
+        )
+        return str(destination)
 
     def _completed_images(self, images_dir, pose_items):
         record = self._run_store.load(self.run_id)

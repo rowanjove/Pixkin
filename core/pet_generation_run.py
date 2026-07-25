@@ -334,6 +334,7 @@ class PetGenerationRunStore:
             "static_qa_report",
             "animation_qa_report",
             "animation_previews",
+            "generation_diagnostic_report",
             "package",
             "installed_package_id",
         ):
