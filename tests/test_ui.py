@@ -174,6 +174,19 @@ class UiSmokeTests(unittest.TestCase):
         settings.close()
         lab.close()
 
+    def test_pet_lab_mode_hint_discloses_generation_count(self):
+        lab = PetLabWindow(self.config, self.package_manager)
+        self.assertEqual(lab.mode_input.currentData(), "basic")
+        self.assertIn("5 次图像生成", lab.status.text())
+
+        lab.mode_input.setCurrentIndex(
+            lab.mode_input.findData("standard")
+        )
+
+        self.assertIn("20 次图像生成", lab.status.text())
+        self.assertIn("实际费用", lab.status.text())
+        lab.close()
+
     def test_chat_escapes_user_html(self):
         chat = ChatBubbleWindow()
         chat.append_message("user", "<script>bad()</script>")
