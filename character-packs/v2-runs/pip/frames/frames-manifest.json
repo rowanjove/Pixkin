@@ -1,0 +1,125 @@
+{
+  "ok": true,
+  "chroma_key": {
+    "hex": "#00FF00",
+    "rgb": [
+      0,
+      255,
+      0
+    ],
+    "threshold": 96.0
+  },
+  "rows": [
+    {
+      "state": "idle",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\idle\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\idle\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\idle\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\idle\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\idle\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\idle\\05.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "running-right",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\05.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\06.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-right\\07.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "running-left",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\05.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\06.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running-left\\07.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "waving",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waving\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waving\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waving\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waving\\03.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "jumping",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\jumping\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\jumping\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\jumping\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\jumping\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\jumping\\04.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "failed",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\05.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\06.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\failed\\07.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "waiting",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waiting\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waiting\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waiting\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waiting\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waiting\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\waiting\\05.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "running",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\running\\05.png"
+      ],
+      "method": "components"
+    },
+    {
+      "state": "review",
+      "frames": [
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\review\\00.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\review\\01.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\review\\02.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\review\\03.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\review\\04.png",
+        "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\pip\\frames\\review\\05.png"
+      ],
+      "method": "components"
+    }
+  ]
+}

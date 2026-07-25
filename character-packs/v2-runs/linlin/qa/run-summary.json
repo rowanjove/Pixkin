@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "run_dir": "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\linlin",
+  "spritesheet": "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\linlin\\final\\spritesheet.webp",
+  "validation": "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\linlin\\final\\validation.json",
+  "contact_sheet": "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\linlin\\qa\\contact-sheet.png",
+  "review": "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\linlin\\qa\\review.json",
+  "videos": "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-runs\\linlin\\qa\\videos",
+  "package": "F:\\AI\\vibecoding\\zhuochong\\character-packs\\v2-built\\linlin"
+}

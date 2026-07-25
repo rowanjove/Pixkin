@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Verify generated version metadata
+        run: python scripts/generate_version_info.py --check
+
+      - name: Compile Python sources
+        run: python -m compileall -q core ui scripts main.py preview_ui.py
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Build folder distribution smoke test
+        run: python -m PyInstaller --noconfirm desktop_pet.spec
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "dist\Pixkin\Pixkin.exe")) {
+            throw "Missing dist\Pixkin\Pixkin.exe"
+          }
+          foreach ($Name in @("shanshan.zip", "linlin.zip", "pip.zip")) {
+            $Path = Join-Path "dist\Pixkin\_internal\character-packs" $Name
+            if (-not (Test-Path -LiteralPath $Path)) {
+              throw "Missing bundled character: $Path"
+            }
+          }
