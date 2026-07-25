@@ -40,6 +40,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "character": {
         "active_pack": "shanshan"
     },
+    "user": {
+        "display_name": "我",
+        "avatar_path": ""
+    },
     "app": {
         "first_run_complete": False,
         "start_with_windows": False,

@@ -10,11 +10,11 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QRect
+from PyQt6.QtCore import QCoreApplication, Qt, QPointF, QEvent, QObject, QRect
 from PyQt6.QtGui import QMouseEvent, QRegion
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QListWidget, QMessageBox, QPushButton
+    QApplication, QDialog, QLabel, QListWidget, QMessageBox, QPushButton
 )
 
 from core.character_package import (
@@ -24,6 +24,7 @@ from core.config import ConfigManager
 from core.pet_animator import PetState
 from core.pet_generation_run import PetGenerationRunStore
 from core.secrets import SecretStore
+from core.tool_registry import ToolRegistry
 from ui.chat_window import BubbleShell, ChatBubbleWindow
 from ui.onboarding_window import FirstRunWindow
 from ui.pet_lab_window import PetLabWindow
@@ -42,6 +43,13 @@ class UiSmokeTests(unittest.TestCase):
         cls.package_manager = CharacterPackageManager(
             cls.config, base / "characters"
         )
+
+    def tearDown(self):
+        self.app.processEvents()
+        QCoreApplication.sendPostedEvents(
+            None, QEvent.Type.DeferredDelete
+        )
+        self.app.processEvents()
 
     def test_first_wave_characters_are_bundled_builtins(self):
         self.assertEqual(
@@ -294,6 +302,7 @@ class UiSmokeTests(unittest.TestCase):
             applied.accept()
             self.app.processEvents()
         controller.pet_window.apply_config.assert_called_once()
+        controller.pet_window.chat_window.set_user_profile.assert_called_once()
         controller._apply_tray_theme.assert_called_once()
         controller._restart_live_monitor.assert_called_once()
         set_startup.assert_called_once()
@@ -432,6 +441,69 @@ class UiSmokeTests(unittest.TestCase):
         )
         chat.set_busy(True)
         self.assertEqual(chat.status_label.text(), "思考中…")
+        chat.close()
+
+    def test_chat_restores_input_focus_after_response(self):
+        chat = ChatBubbleWindow()
+        chat.show()
+        chat.activateWindow()
+        chat.input_field.setFocus()
+        self.app.processEvents()
+        self.assertTrue(chat.input_field.hasFocus())
+
+        chat.set_busy(True)
+        chat.set_busy(False)
+        QTest.qWait(20)
+        self.app.processEvents()
+
+        self.assertTrue(chat.input_field.isEnabled())
+        self.assertTrue(chat.input_field.hasFocus())
+        chat.close()
+
+    def test_tool_menu_reflects_registered_capabilities(self):
+        registry = ToolRegistry()
+        chat = ChatBubbleWindow()
+        chat.set_tool_schemas(registry.get_tools_schema())
+        menu = chat._build_tool_menu()
+        labels = [action.text() for action in menu.actions()]
+
+        self.assertIn("计算算式…", labels)
+        self.assertIn("打开网页…", labels)
+        self.assertIn("查看磁盘空间", labels)
+        self.assertIn("打开文件管理器", labels)
+        self.assertIn("7 项已连接", labels[0])
+        menu.close()
+        chat.close()
+
+    def test_user_profile_updates_right_side_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            avatar = Path(directory) / "avatar.png"
+            Image.new("RGB", (80, 50), (78, 145, 220)).save(avatar)
+            chat = ChatBubbleWindow()
+            chat.set_user_profile("阿明", avatar)
+            chat.append_message("user", "你好")
+            row = chat._message_rows[-1]
+
+            self.assertEqual(row.author_label.text(), "阿明")
+            user_avatar = row.findChild(QLabel, "userAvatar")
+            self.assertIsNotNone(user_avatar)
+            self.assertFalse(user_avatar.pixmap().isNull())
+            chat.close()
+
+    def test_live_alert_uses_structured_card(self):
+        chat = ChatBubbleWindow()
+        chat.show_live_alert("B站", "小主播", "今晚一起画画")
+        row = chat._message_rows[-1]
+
+        self.assertEqual(
+            row.findChild(QLabel, "platformBadge").text(), "B站"
+        )
+        self.assertEqual(
+            row.findChild(QLabel, "alertAnchor").text(), "小主播 开播了"
+        )
+        self.assertEqual(
+            row.findChild(QLabel, "alertTitle").text(), "今晚一起画画"
+        )
         chat.close()
 
     def test_streaming_updates_one_row_and_keeps_scroll_at_bottom(self):
@@ -1057,6 +1129,41 @@ class UiSmokeTests(unittest.TestCase):
             self.assertEqual(
                 [call.args[0] for call in save_key.call_args_list],
                 ["new-key", "old-key"],
+            )
+            settings.close()
+
+    def test_settings_persists_user_name_and_managed_avatar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = ConfigManager(str(base / "config.json"))
+            manager = CharacterPackageManager(
+                config, base / "characters"
+            )
+            source = base / "selected-avatar.png"
+            Image.new("RGB", (96, 64), (205, 86, 117)).save(source)
+            with patch.object(
+                SecretStore, "get_api_key", return_value=""
+            ):
+                settings = SettingsWindow(config, manager)
+            settings.user_name_input.setText("林墨")
+            settings._user_avatar_source = str(source)
+            settings._set_user_avatar_preview(source)
+
+            with (
+                patch.object(SecretStore, "get_api_key", return_value=""),
+                patch.object(SecretStore, "set_api_key", return_value=True),
+                patch(
+                    "ui.settings_window.user_data_dir",
+                    return_value=base / "userdata",
+                ),
+            ):
+                settings._save()
+
+            avatar_path = Path(config.get("user", "avatar_path"))
+            self.assertEqual(config.get("user", "display_name"), "林墨")
+            self.assertTrue(avatar_path.is_file())
+            self.assertEqual(
+                avatar_path.parent, base / "userdata" / "profile"
             )
             settings.close()
 

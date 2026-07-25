@@ -1,7 +1,14 @@
+import ast
 import datetime
+import math
 import platform
+import shutil
 import subprocess
+import webbrowser
+from pathlib import Path
 from typing import Dict, Any, List, Callable
+from urllib.parse import urlparse
+
 
 class ToolRegistry:
     """Tool Calls (Function Calling) 注册与调度中心"""
@@ -67,7 +74,7 @@ class ToolRegistry:
         # 工具 3: 打开常见系统应用
         self.register_tool(
             name="open_application",
-            description="在 Windows 系统上打开常用应用程序，例如 notepad(记事本), calc(计算器), mspaint(画图板), cmd(命令行)。",
+            description="在 Windows 系统上打开白名单内的常用应用，例如记事本、计算器、画图或文件资源管理器。",
             parameters={
                 "type": "object",
                 "properties": {
@@ -79,6 +86,45 @@ class ToolRegistry:
                 "required": ["app_name"]
             },
             handler=self._tool_open_application
+        )
+
+        self.register_tool(
+            name="calculate_expression",
+            description="安全计算只包含数字、括号和常见算术运算符的表达式。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "例如：(12.5 + 7.5) * 3 / 2"
+                    }
+                },
+                "required": ["expression"]
+            },
+            handler=self._tool_calculate_expression,
+        )
+
+        self.register_tool(
+            name="get_disk_usage",
+            description="查看当前用户磁盘的容量、已用空间和剩余空间。",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=self._tool_get_disk_usage,
+        )
+
+        self.register_tool(
+            name="open_url",
+            description="使用默认浏览器打开经过校验的 HTTP 或 HTTPS 网页。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "完整的 http:// 或 https:// 网页地址"
+                    }
+                },
+                "required": ["url"]
+            },
+            handler=self._tool_open_url,
         )
 
     def _tool_list_available_tools(self) -> str:
@@ -115,3 +161,72 @@ class ToolRegistry:
             return f"已为您成功启动应用: {app_name}"
         else:
             return f"未授权或不支持打开该应用: '{app_name}'。支持的应用有: {', '.join(allowed_apps.keys())}"
+
+    @staticmethod
+    def _tool_calculate_expression(expression: str) -> str:
+        source = str(expression or "").strip()
+        if not source or len(source) > 160:
+            raise ValueError("算式不能为空，且长度不能超过 160 个字符")
+        tree = ast.parse(source, mode="eval")
+        binary = {
+            ast.Add: lambda a, b: a + b,
+            ast.Sub: lambda a, b: a - b,
+            ast.Mult: lambda a, b: a * b,
+            ast.Div: lambda a, b: a / b,
+            ast.FloorDiv: lambda a, b: a // b,
+            ast.Mod: lambda a, b: a % b,
+            ast.Pow: lambda a, b: a ** b,
+        }
+        unary = {
+            ast.UAdd: lambda value: value,
+            ast.USub: lambda value: -value,
+        }
+
+        def evaluate(node):
+            if isinstance(node, ast.Expression):
+                return evaluate(node.body)
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, bool) or not isinstance(
+                    node.value, (int, float)
+                ):
+                    raise ValueError("算式只能包含数字")
+                return node.value
+            if isinstance(node, ast.UnaryOp) and type(node.op) in unary:
+                return unary[type(node.op)](evaluate(node.operand))
+            if isinstance(node, ast.BinOp) and type(node.op) in binary:
+                left = evaluate(node.left)
+                right = evaluate(node.right)
+                if isinstance(node.op, ast.Pow) and abs(right) > 12:
+                    raise ValueError("指数绝对值不能超过 12")
+                return binary[type(node.op)](left, right)
+            raise ValueError("算式包含不支持的内容")
+
+        result = evaluate(tree)
+        if isinstance(result, complex) or not math.isfinite(float(result)):
+            raise ValueError("计算结果无效或超出范围")
+        if abs(float(result)) > 1e100:
+            raise ValueError("计算结果过大")
+        return f"{source} = {result}"
+
+    @staticmethod
+    def _tool_get_disk_usage() -> str:
+        root = Path.home().anchor or str(Path.home())
+        total, used, free = shutil.disk_usage(root)
+        gb = 1024 ** 3
+        return (
+            f"磁盘 {root}：总容量 {total / gb:.1f} GB，"
+            f"已用 {used / gb:.1f} GB，剩余 {free / gb:.1f} GB"
+        )
+
+    @staticmethod
+    def _tool_open_url(url: str) -> str:
+        target = str(url or "").strip()
+        if len(target) > 2048:
+            raise ValueError("网址过长")
+        parsed = urlparse(target)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("只允许打开有效的 HTTP 或 HTTPS 网页")
+        opened = webbrowser.open(target, new=2)
+        if not opened:
+            raise RuntimeError("默认浏览器未接受打开请求")
+        return f"已使用默认浏览器打开：{target}"

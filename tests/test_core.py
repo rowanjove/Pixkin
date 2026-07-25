@@ -261,6 +261,35 @@ class ToolRegistryTests(unittest.TestCase):
         registry = ToolRegistry()
         self.assertIn("not found", registry.execute_tool("missing_tool", {}))
 
+    def test_calculator_accepts_arithmetic_and_rejects_code(self):
+        registry = ToolRegistry()
+        self.assertEqual(
+            registry.execute_tool(
+                "calculate_expression", {"expression": "(12 + 8) * 2"}
+            ),
+            "(12 + 8) * 2 = 40",
+        )
+        rejected = registry.execute_tool(
+            "calculate_expression",
+            {"expression": "__import__('os').system('whoami')"},
+        )
+        self.assertIn("Error executing tool", rejected)
+
+    def test_open_url_restricts_protocols(self):
+        registry = ToolRegistry()
+        with patch(
+            "core.tool_registry.webbrowser.open", return_value=True
+        ) as open_url:
+            result = registry.execute_tool(
+                "open_url", {"url": "https://example.com/path"}
+            )
+        self.assertIn("已使用默认浏览器打开", result)
+        open_url.assert_called_once_with("https://example.com/path", new=2)
+        self.assertIn(
+            "Error executing tool",
+            registry.execute_tool("open_url", {"url": "file:///secret.txt"}),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,9 @@
+import hashlib
+import shutil
+from pathlib import Path
+
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
@@ -15,6 +19,7 @@ from core.character_package import (
     CharacterPackageManager,
 )
 from core.config import ConfigManager
+from core.paths import user_data_dir
 from core.secrets import SecretStore
 from core.version import VERSION
 from ui.pet_lab_window import PetLabWindow
@@ -65,6 +70,31 @@ def _fitted_character_pixmap(path, size: int) -> QPixmap:
     return canvas
 
 
+def _profile_avatar_pixmap(path, size: int) -> QPixmap:
+    source = QPixmap(str(path)) if path else QPixmap()
+    if source.isNull():
+        return QPixmap()
+    canvas = QPixmap(size, size)
+    canvas.fill(Qt.GlobalColor.transparent)
+    scaled = source.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    x = max(0, (scaled.width() - size) // 2)
+    y = max(0, (scaled.height() - size) // 2)
+    cropped = scaled.copy(x, y, size, size)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addEllipse(0, 0, size, size)
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, cropped)
+    painter.end()
+    return canvas
+
+
 class SettingsWindow(QDialog):
     """带侧栏的产品级设置中心。"""
 
@@ -78,6 +108,9 @@ class SettingsWindow(QDialog):
         self.config_manager = config_manager
         self.package_manager = package_manager or CharacterPackageManager(config_manager)
         self.character_changed = False
+        self._user_avatar_source = str(
+            self.config_manager.get("user", "avatar_path", "") or ""
+        )
         self.setFont(QFont("Microsoft YaHei UI", 9))
         self.setWindowTitle("Pixkin · 设置中心")
         self.setMinimumSize(820, 620)
@@ -156,6 +189,10 @@ class SettingsWindow(QDialog):
                 background: #202A3D; color: #8792A8; border-radius: 18px;
                 font-size: 10px;
             }
+            QLabel#userAvatarPreview {
+                background: #263249; color: #7BE0D0; border: 1px solid #3A4863;
+                border-radius: 27px; font-size: 10px; font-weight: 850;
+            }
         """
         if theme != "light":
             return base
@@ -202,6 +239,9 @@ class SettingsWindow(QDialog):
             QPushButton#link { color: #16897D; }
             QPushButton:disabled { background: #E5EAF1; color: #667085; }
             QLabel#characterPreview { background: #E8EDF4; color: #667085; }
+            QLabel#userAvatarPreview {
+                background: #E7EEF5; color: #16897D; border-color: #CAD5E2;
+            }
         """
 
     def apply_theme(self, requested=None):
@@ -346,6 +386,45 @@ class SettingsWindow(QDialog):
             "角色与人设", "管理、切换和重命名角色；山山、凛凛与 Pip 三个内置角色始终保留。"
         ))
 
+        profile_card, profile_layout = self._card("我的聊天资料")
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(12)
+        self.user_avatar_preview = QLabel()
+        self.user_avatar_preview.setObjectName("userAvatarPreview")
+        self.user_avatar_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.user_avatar_preview.setFixedSize(56, 56)
+        profile_row.addWidget(self.user_avatar_preview)
+
+        profile_fields = QVBoxLayout()
+        profile_fields.setSpacing(5)
+        profile_label = QLabel("昵称")
+        profile_label.setObjectName("muted")
+        self.user_name_input = QLineEdit(
+            str(self.config_manager.get("user", "display_name", "我") or "我")
+        )
+        self.user_name_input.setMaxLength(20)
+        self.user_name_input.setPlaceholderText("显示在右侧聊天气泡上方")
+        profile_fields.addWidget(profile_label)
+        profile_fields.addWidget(self.user_name_input)
+        profile_row.addLayout(profile_fields, 1)
+
+        choose_avatar = QPushButton("选择头像")
+        choose_avatar.setObjectName("secondary")
+        choose_avatar.clicked.connect(self._choose_user_avatar)
+        clear_avatar = QPushButton("使用文字头像")
+        clear_avatar.setObjectName("link")
+        clear_avatar.clicked.connect(self._clear_user_avatar)
+        profile_row.addWidget(choose_avatar)
+        profile_row.addWidget(clear_avatar)
+        profile_layout.addLayout(profile_row)
+        layout.addWidget(profile_card)
+        if self._user_avatar_source:
+            self._set_user_avatar_preview(self._user_avatar_source)
+        else:
+            self.user_avatar_preview.setText(
+                (self.user_name_input.text().strip() or "我")[:2]
+            )
+
         card, card_layout = self._card(
             "角色列表", "选择角色后可设为当前、重命名或删除。"
         )
@@ -370,7 +449,7 @@ class SettingsWindow(QDialog):
         preview_row = QHBoxLayout()
         self.character_preview = QLabel("暂无\n图片")
         self.character_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.character_preview.setFixedSize(92, 92)
+        self.character_preview.setFixedSize(82, 82)
         self.character_preview.setObjectName("characterPreview")
         meta_stack = QVBoxLayout()
         self.character_name = QLabel("请选择角色")
@@ -429,7 +508,7 @@ class SettingsWindow(QDialog):
             "当前角色提示词", "切换角色时会自动载入对应人设，也可以在这里覆盖。"
         )
         self.prompt_input = QTextEdit()
-        self.prompt_input.setMinimumHeight(105)
+        self.prompt_input.setMinimumHeight(76)
         self.prompt_input.setPlainText(
             self.config_manager.get("pet", "system_prompt", "")
         )
@@ -910,12 +989,78 @@ class SettingsWindow(QDialog):
         )
         button.setText("隐藏" if checked else "显示")
 
+    def _set_user_avatar_preview(self, path):
+        pixmap = _profile_avatar_pixmap(path, 54)
+        if pixmap.isNull():
+            self.user_avatar_preview.setPixmap(QPixmap())
+            name = self.user_name_input.text().strip() or "我"
+            self.user_avatar_preview.setText(name[:2])
+        else:
+            self.user_avatar_preview.clear()
+            self.user_avatar_preview.setPixmap(pixmap)
+
+    def _choose_user_avatar(self):
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择聊天头像",
+            "",
+            "图片 (*.png *.jpg *.jpeg *.webp *.bmp);;所有文件 (*)",
+        )
+        if not selected:
+            return
+        if QPixmap(selected).isNull():
+            QMessageBox.warning(
+                self, "无法使用头像", "该文件不是受支持或可读取的图片。"
+            )
+            return
+        self._user_avatar_source = selected
+        self._set_user_avatar_preview(selected)
+
+    def _clear_user_avatar(self):
+        self._user_avatar_source = ""
+        self._set_user_avatar_preview("")
+
+    def _persist_user_avatar(self):
+        if not self._user_avatar_source:
+            return True, ""
+        source = Path(self._user_avatar_source)
+        if not source.is_file() or QPixmap(str(source)).isNull():
+            QMessageBox.warning(
+                self, "头像保存失败", "所选头像已不存在或无法读取，请重新选择。"
+            )
+            return False, ""
+        suffix = source.suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            suffix = ".png"
+        try:
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+            destination = (
+                user_data_dir()
+                / "profile"
+                / f"user-avatar-{digest}{suffix}"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "头像保存失败", f"无法复制头像到本地资料目录：{exc}"
+            )
+            return False, ""
+        return True, str(destination)
+
     def _save(self):
         base_url = self.api_url_input.text().strip()
         model = self.api_model_input.text().strip()
         if not base_url or not model:
             self.navigation.setCurrentRow(0)
             QMessageBox.warning(self, "还差一点", "请填写接口地址和模型名称。")
+            return
+
+        user_name = self.user_name_input.text().strip()[:20] or "我"
+        avatar_ok, user_avatar_path = self._persist_user_avatar()
+        if not avatar_ok:
+            self.navigation.setCurrentRow(1)
             return
 
         api_key = self.api_key_input.text().strip()
@@ -981,6 +1126,10 @@ class SettingsWindow(QDialog):
                 "notify_if_live_on_start": self.notify_start_cb.isChecked(),
                 "interval_seconds": self.live_interval_input.value(),
                 "rooms": self._collect_rooms(),
+            },
+            "user": {
+                "display_name": user_name,
+                "avatar_path": user_avatar_path,
             },
             "app": {
                 "start_with_windows": self.startup_cb.isChecked(),
