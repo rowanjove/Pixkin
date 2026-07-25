@@ -90,8 +90,17 @@ def _circle_path(diameter: int, offset: int = 0):
 
 
 class MessageRow(QWidget):
-    def __init__(self, role: str, content: str, avatar_path=None, parent=None):
+    def __init__(
+        self,
+        role: str,
+        content: str,
+        avatar_path=None,
+        author_name="山山",
+        parent=None,
+    ):
         super().__init__(parent)
+        self.text_label = None
+        self.author_label = None
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -106,6 +115,7 @@ class MessageRow(QWidget):
             pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pill.setObjectName("errorPill" if role == "error" else "toolPill")
             pill.setMaximumWidth(330)
+            self.text_label = pill
             row.addStretch()
             row.addWidget(pill)
             row.addStretch()
@@ -136,6 +146,7 @@ class MessageRow(QWidget):
                     ).height(),
                 )
             )
+            self.text_label = text
             card_layout.addWidget(eyebrow)
             card_layout.addWidget(text)
             row.addWidget(card)
@@ -160,8 +171,9 @@ class MessageRow(QWidget):
         bubble_layout.setContentsMargins(13, 10, 13, 10)
         bubble_layout.setSpacing(4)
         if role != "user":
-            author = QLabel("PIXKIN 助手")
+            author = QLabel(author_name)
             author.setObjectName("messageAuthor")
+            self.author_label = author
             bubble_layout.addWidget(author)
         text = QLabel(content or "•••")
         text.setObjectName("messageText")
@@ -170,6 +182,7 @@ class MessageRow(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         text.setWordWrap(True)
+        self.text_label = text
         bubble_layout.addWidget(text)
 
         if role == "user":
@@ -180,6 +193,13 @@ class MessageRow(QWidget):
             row.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
             row.addWidget(bubble)
             row.addStretch()
+
+    def set_content(self, content: str):
+        if self.text_label is None:
+            return
+        self.text_label.setText(content or "•••")
+        self.text_label.updateGeometry()
+        self.updateGeometry()
 
 
 class ChatBubbleWindow(QWidget):
@@ -204,12 +224,24 @@ class ChatBubbleWindow(QWidget):
         self.resize(430, 600)
 
         self._messages = []
+        self._message_rows = []
         self._stream_index = None
+        self._stream_row = None
         self._drag_origin = QPoint()
         self._window_origin = QPoint()
         self._character_name = "山山"
         self._avatar_path = resource_path("assets/pixkin/pip-avatar.png")
         self._init_ui()
+        self._stream_update_timer = QTimer(self)
+        self._stream_update_timer.setSingleShot(True)
+        self._stream_update_timer.setInterval(16)
+        self._stream_update_timer.timeout.connect(
+            self._flush_stream_update
+        )
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.setInterval(16)
+        self._scroll_timer.timeout.connect(self._scroll_to_bottom)
         self._render_messages()
 
     def _init_ui(self):
@@ -337,18 +369,18 @@ class ChatBubbleWindow(QWidget):
         self.avatar_label.setPixmap(_avatar_pixmap(self._avatar_path, 42))
         title_stack = QVBoxLayout()
         title_stack.setSpacing(0)
-        brand = QLabel("PIXKIN")
-        brand.setObjectName("brand")
+        self.brand_label = QLabel(self._character_name)
+        self.brand_label.setObjectName("brand")
         status_row = QHBoxLayout()
         status_row.setSpacing(4)
         dot = QLabel("●")
         dot.setObjectName("statusDot")
-        self.status_label = QLabel("山山 · 待命")
+        self.status_label = QLabel("待命")
         self.status_label.setObjectName("characterName")
         status_row.addWidget(dot)
         status_row.addWidget(self.status_label)
         status_row.addStretch()
-        title_stack.addWidget(brand)
+        title_stack.addWidget(self.brand_label)
         title_stack.addLayout(status_row)
 
         studio_btn = QPushButton("伙伴工坊")
@@ -493,13 +525,15 @@ class ChatBubbleWindow(QWidget):
         else:
             self._avatar_path = resource_path("assets/pixkin/pip-avatar.png")
         self.avatar_label.setPixmap(_avatar_pixmap(self._avatar_path, 42))
-        self.status_label.setText(f"{self._character_name} · 待命")
+        self.brand_label.setText(self._character_name)
+        self.setWindowTitle(f"{self._character_name} · 对话")
         self.input_field.setPlaceholderText(
             f"问问{self._character_name}，或让它帮你做点什么…"
         )
         self._render_messages()
 
     def append_message(self, role: str, content: str):
+        self._stream_update_timer.stop()
         if self._stream_index is not None:
             stream_item = self._messages[self._stream_index]
             if not stream_item["content"] and role != "assistant":
@@ -509,6 +543,7 @@ class ChatBubbleWindow(QWidget):
         self._render_messages()
 
     def start_assistant_message(self):
+        self._stream_update_timer.stop()
         self._messages.append({"role": "assistant", "content": ""})
         self._stream_index = len(self._messages) - 1
         self._render_messages()
@@ -517,12 +552,19 @@ class ChatBubbleWindow(QWidget):
         if self._stream_index is None:
             self.start_assistant_message()
         self._messages[self._stream_index]["content"] += chunk
-        self._render_messages()
+        if not self._stream_update_timer.isActive():
+            self._stream_update_timer.start()
 
     def complete_stream(self):
+        self._stream_update_timer.stop()
+        self._flush_stream_update()
         self._stream_index = None
+        self._stream_row = None
+        self._render_transcript()
+        self._schedule_scroll_to_bottom()
 
     def cancel_stream(self):
+        self._stream_update_timer.stop()
         if self._stream_index is not None:
             if not self._messages[self._stream_index]["content"]:
                 self._messages.pop(self._stream_index)
@@ -534,7 +576,7 @@ class ChatBubbleWindow(QWidget):
         self.send_btn.setDisabled(busy)
         self.tool_btn.setDisabled(busy)
         state = "思考中…" if busy else "待命"
-        self.status_label.setText(f"{self._character_name} · {state}")
+        self.status_label.setText(state)
 
     def show_alert_bubble(self, title: str, text: str):
         clean = text.replace("<br/>", "\n").replace("<b>", "").replace("</b>", "")
@@ -543,6 +585,8 @@ class ChatBubbleWindow(QWidget):
         self.raise_()
 
     def _clear_message_widgets(self):
+        self._message_rows = []
+        self._stream_row = None
         while self.messages_layout.count():
             item = self.messages_layout.takeAt(0)
             widget = item.widget()
@@ -590,17 +634,34 @@ class ChatBubbleWindow(QWidget):
             self.messages_layout.addWidget(self._welcome_widget())
             self.messages_layout.addStretch()
         else:
-            for item in self._messages:
-                self.messages_layout.addWidget(
-                    MessageRow(
-                        item["role"],
-                        item["content"] or "•••",
-                        self._avatar_path,
-                    )
+            for index, item in enumerate(self._messages):
+                message = MessageRow(
+                    item["role"],
+                    item["content"] or "•••",
+                    self._avatar_path,
+                    self._character_name,
                 )
+                self._message_rows.append(message)
+                self.messages_layout.addWidget(message)
+                if index == self._stream_index:
+                    self._stream_row = message
             self.messages_layout.addStretch()
         self._render_transcript()
-        QTimer.singleShot(0, self._scroll_to_bottom)
+        self._schedule_scroll_to_bottom()
+
+    def _flush_stream_update(self):
+        if self._stream_index is None:
+            return
+        if not 0 <= self._stream_index < len(self._messages):
+            return
+        if self._stream_row is None:
+            self._render_messages()
+            return
+        content = self._messages[self._stream_index]["content"]
+        self._stream_row.set_content(content)
+        self.messages_layout.invalidate()
+        self.messages_host.updateGeometry()
+        self._schedule_scroll_to_bottom()
 
     def _render_transcript(self):
         parts = ["<div>"]
@@ -611,8 +672,18 @@ class ChatBubbleWindow(QWidget):
         self.chat_history.setHtml("".join(parts))
 
     def _scroll_to_bottom(self):
+        self.messages_layout.activate()
+        self.messages_host.adjustSize()
         bar = self.scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
+        QTimer.singleShot(
+            0,
+            lambda target=bar: target.setValue(target.maximum()),
+        )
+
+    def _schedule_scroll_to_bottom(self):
+        if not self._scroll_timer.isActive():
+            self._scroll_timer.start()
 
     def _show_tool_menu(self):
         menu = QMenu(self)

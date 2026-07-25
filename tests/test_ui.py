@@ -421,6 +421,48 @@ class UiSmokeTests(unittest.TestCase):
         chat.set_character("椰子")
         self.assertIn("椰子", chat.input_field.placeholderText())
         self.assertNotIn("山山", chat.input_field.placeholderText())
+        self.assertEqual(chat.brand_label.text(), "椰子")
+        self.assertEqual(chat.status_label.text(), "待命")
+        self.assertNotIn("椰子", chat.status_label.text())
+
+        chat.append_message("assistant", "你好")
+        self.assertEqual(
+            chat._message_rows[-1].author_label.text(),
+            "椰子",
+        )
+        chat.set_busy(True)
+        self.assertEqual(chat.status_label.text(), "思考中…")
+        chat.close()
+
+    def test_streaming_updates_one_row_and_keeps_scroll_at_bottom(self):
+        chat = ChatBubbleWindow()
+        chat.set_character("椰子")
+        chat.append_message(
+            "assistant",
+            "\n".join(f"历史消息 {index}" for index in range(40)),
+        )
+        chat.show()
+        self.app.processEvents()
+        chat.start_assistant_message()
+        stream_row = chat._stream_row
+        bar = chat.scroll.verticalScrollBar()
+        bar.setValue(0)
+
+        chunks = [f"第{index}段\n" for index in range(30)]
+        with patch.object(chat, "_render_messages") as render_messages:
+            for chunk in chunks:
+                chat.append_chunk(chunk)
+            QTest.qWait(60)
+            self.app.processEvents()
+
+        self.assertIs(chat._stream_row, stream_row)
+        self.assertEqual(stream_row.text_label.text(), "".join(chunks))
+        render_messages.assert_not_called()
+        self.assertGreater(bar.maximum(), 0)
+        self.assertEqual(bar.value(), bar.maximum())
+
+        chat.complete_stream()
+        self.assertIn("第29段", chat.chat_history.toPlainText())
         chat.close()
 
     def test_chat_shell_has_no_bottom_triangle_cutout(self):
