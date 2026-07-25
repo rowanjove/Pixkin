@@ -546,12 +546,26 @@ class PetGenerationDiagnostics:
         anonymous_id = str(manifest.get("anonymous_run_id", ""))
         if not ANONYMOUS_RUN_ID_PATTERN.fullmatch(anonymous_id):
             raise IssueBundleError("问题包匿名编号格式无效。")
-        if set(manifest.get("contents") or []) != set(encoded):
+        contents = manifest.get("contents")
+        if (
+            not isinstance(contents, list)
+            or not all(isinstance(name, str) for name in contents)
+            or len(contents) != len(set(contents))
+            or set(contents) != set(encoded)
+        ):
             raise IssueBundleError("问题包清单与实际文件不一致。")
         expected_reports = {
             name for name in encoded if name.startswith("reports/")
         }
-        if set(manifest.get("included_reports") or []) != expected_reports:
+        included_reports = manifest.get("included_reports")
+        if (
+            not isinstance(included_reports, list)
+            or not all(
+                isinstance(name, str) for name in included_reports
+            )
+            or len(included_reports) != len(set(included_reports))
+            or set(included_reports) != expected_reports
+        ):
             raise IssueBundleError("问题包 QA 报告清单不一致。")
         expected_privacy = {
             "images_included": False,

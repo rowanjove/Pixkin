@@ -559,7 +559,6 @@ class PetGenerationWorker(QThread):
                 self.run_id, "action_generation", status="running"
             )
             generated = self._completed_images(images_dir, pose_items)
-            total = len(pose_items)
             review_pose_ids = set(CORE_REVIEW_POSE_IDS)
             if self.generation_mode == "full":
                 review_pose_ids.add("run_right")

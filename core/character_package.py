@@ -66,6 +66,10 @@ V2_REQUIRED_FIELDS = {
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".webp", ".jpg", ".jpeg"}
 MAX_PACKAGE_BYTES = 100 * 1024 * 1024
 MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_METADATA_BYTES = 1024 * 1024
+MAX_YAML_ALIASES = 200
+MAX_YAML_DEPTH = 32
+MAX_YAML_NODES = 20_000
 MAX_FILE_COUNT = 500
 MAX_IMAGE_PIXELS = 20_000_000
 MAX_TOTAL_IMAGE_PIXELS = 32_000_000
@@ -73,6 +77,12 @@ MAX_FRAMES_PER_ANIMATION = 30
 MAX_TOTAL_ANIMATION_FRAMES = 600
 DEFAULT_PACKAGE_ID = "shanshan"
 BUILTIN_PACKAGE_IDS = frozenset({"shanshan", "linlin", "pip"})
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+WINDOWS_FORBIDDEN_CHARS = frozenset('<>:"|?*')
 
 
 class CharacterPackageError(ValueError):
@@ -154,8 +164,14 @@ class CharacterPackageManager:
         return packages
 
     def get_active(self) -> Optional[CharacterPackage]:
-        package_id = self.config.get("character", "active_pack", "")
+        package_id = str(
+            self.config.get("character", "active_pack", "")
+        )
         if not package_id:
+            return None
+        try:
+            package_id = self._validated_id(package_id)
+        except CharacterPackageError:
             return None
         directory = self.root / package_id
         if not directory.is_dir():
@@ -166,6 +182,7 @@ class CharacterPackageManager:
             return None
 
     def activate(self, package_id: str) -> CharacterPackage:
+        package_id = self._validated_id(package_id)
         package = self._load_from_directory(self.root / package_id)
         updates = {
             "character": {"active_pack": package.package_id},
@@ -379,8 +396,20 @@ class CharacterPackageManager:
                     raise CharacterPackageError("角色包文件数量过多。")
                 total = 0
                 md_candidates = []
+                normalized_names = set()
                 for info in infos:
                     self._validate_zip_member(info)
+                    normalized_name = (
+                        info.filename.replace("\\", "/")
+                        .rstrip("/")
+                        .casefold()
+                    )
+                    if normalized_name in normalized_names:
+                        raise CharacterPackageError(
+                            "角色包包含重复或大小写冲突的路径："
+                            f"{info.filename}"
+                        )
+                    normalized_names.add(normalized_name)
                     total += info.file_size
                     if total > MAX_PACKAGE_BYTES:
                         raise CharacterPackageError("角色包解压后不能超过 100 MB。")
@@ -391,6 +420,10 @@ class CharacterPackageManager:
                         "ZIP 中必须且只能包含一个 character.md。"
                     )
                 md_info = md_candidates[0]
+                if md_info.file_size > MAX_METADATA_BYTES:
+                    raise CharacterPackageError(
+                        "character.md 不能超过 1 MB。"
+                    )
                 prefix = str(PurePosixPath(md_info.filename.replace("\\", "/")).parent)
                 prefix = "" if prefix == "." else prefix.rstrip("/") + "/"
                 text = archive.read(md_info).decode("utf-8-sig")
@@ -490,18 +523,73 @@ class CharacterPackageManager:
 
     @staticmethod
     def _parse_frontmatter(text: str) -> dict:
+        if len(text.encode("utf-8")) > MAX_METADATA_BYTES:
+            raise CharacterPackageError("character.md 不能超过 1 MB。")
         match = re.match(r"^\s*---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)", text, re.S)
         if not match:
             raise CharacterPackageError(
                 "character.md 必须以 YAML Front Matter（---）开头。"
             )
         try:
-            metadata = yaml.safe_load(match.group(1))
-        except yaml.YAMLError as exc:
+            frontmatter = match.group(1)
+            alias_count = sum(
+                isinstance(token, yaml.tokens.AliasToken)
+                for token in yaml.scan(frontmatter)
+            )
+            if alias_count > MAX_YAML_ALIASES:
+                raise CharacterPackageError(
+                    "character.md 的 YAML 别名数量过多。"
+                )
+            metadata = yaml.safe_load(frontmatter)
+        except CharacterPackageError:
+            raise
+        except (yaml.YAMLError, RecursionError) as exc:
             raise CharacterPackageError(f"character.md 配置无法解析：{exc}") from exc
         if not isinstance(metadata, dict):
             raise CharacterPackageError("character.md 的配置区必须是对象。")
+        CharacterPackageManager._validate_yaml_structure(metadata)
         return metadata
+
+    @staticmethod
+    def _validate_yaml_structure(value):
+        nodes = 0
+
+        def visit(item, depth, active):
+            nonlocal nodes
+            nodes += 1
+            if nodes > MAX_YAML_NODES:
+                raise CharacterPackageError(
+                    "character.md 的 YAML 结构过于复杂。"
+                )
+            if depth > MAX_YAML_DEPTH:
+                raise CharacterPackageError(
+                    "character.md 的 YAML 嵌套层级过深。"
+                )
+            if not isinstance(item, (dict, list, tuple)):
+                return
+            identity = id(item)
+            if identity in active:
+                raise CharacterPackageError(
+                    "character.md 不允许循环 YAML 别名。"
+                )
+            active.add(identity)
+            try:
+                values = (
+                    list(item.items())
+                    if isinstance(item, dict)
+                    else list(item)
+                )
+                for child in values:
+                    if isinstance(item, dict):
+                        key, nested = child
+                        visit(key, depth + 1, active)
+                        visit(nested, depth + 1, active)
+                    else:
+                        visit(child, depth + 1, active)
+            finally:
+                active.remove(identity)
+
+        visit(value, 0, set())
 
     def _validate_metadata(self, metadata: dict, file_names):
         for key in ("id", "name", "animations"):
@@ -952,14 +1040,30 @@ class CharacterPackageManager:
         path = PurePosixPath(normalized)
         if path.is_absolute() or ".." in path.parts or not path.parts:
             raise CharacterPackageError(f"角色资源路径不安全：{value}")
-        if ":" in path.parts[0]:
-            raise CharacterPackageError(f"角色资源路径不安全：{value}")
+        for part in path.parts:
+            stem = part.split(".", 1)[0].upper()
+            if (
+                not part
+                or part.endswith((" ", "."))
+                or stem in WINDOWS_RESERVED_NAMES
+                or any(character in WINDOWS_FORBIDDEN_CHARS for character in part)
+                or any(ord(character) < 32 for character in part)
+            ):
+                raise CharacterPackageError(
+                    f"角色资源路径不安全：{value}"
+                )
         return path
 
     def _validate_zip_member(self, info: zipfile.ZipInfo):
         self._safe_relative(info.filename.rstrip("/"))
+        if info.flag_bits & 0x1:
+            raise CharacterPackageError("角色包不能包含加密文件。")
         if info.file_size > MAX_FILE_BYTES:
             raise CharacterPackageError(f"单个文件超过 25 MB：{info.filename}")
+        if info.compress_size and info.file_size / info.compress_size > 200:
+            raise CharacterPackageError(
+                f"角色包文件压缩比异常：{info.filename}"
+            )
         unix_mode = info.external_attr >> 16
         if unix_mode and (unix_mode & 0o170000) == 0o120000:
             raise CharacterPackageError("角色包不能包含符号链接。")

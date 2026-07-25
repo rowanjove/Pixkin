@@ -892,6 +892,69 @@ class UiSmokeTests(unittest.TestCase):
             )
             settings.close()
 
+    def test_existing_secure_keys_are_not_duplicated_in_plaintext(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = ConfigManager(str(base / "config.json"))
+            manager = CharacterPackageManager(
+                config, base / "characters"
+            )
+            settings = SettingsWindow(config, manager)
+            settings.api_key_input.setText("existing-chat-key")
+            with (
+                patch.object(
+                    SecretStore,
+                    "get_api_key",
+                    return_value="existing-chat-key",
+                ),
+                patch.object(
+                    SecretStore,
+                    "set_api_key",
+                    return_value=False,
+                ),
+                patch.object(QMessageBox, "warning") as settings_warning,
+                patch.object(settings, "accept") as accept,
+            ):
+                settings._save()
+
+            self.assertEqual(config.get("api", "api_key"), "")
+            settings_warning.assert_not_called()
+            accept.assert_called_once()
+            settings.close()
+
+            lab = PetLabWindow(config, manager)
+            lab.reference_paths = [base / "reference.png"]
+            lab.name_input.setText("安全伙伴")
+            lab.api_key.setText("existing-image-key")
+            with (
+                patch.object(
+                    SecretStore,
+                    "get_image_api_key",
+                    return_value="existing-image-key",
+                ),
+                patch.object(
+                    SecretStore,
+                    "set_image_api_key",
+                    return_value=False,
+                ),
+                patch.object(
+                    QMessageBox,
+                    "question",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ),
+                patch.object(QMessageBox, "warning") as lab_warning,
+                patch.object(lab, "_start_worker") as start_worker,
+            ):
+                lab._start_hatch()
+
+            self.assertEqual(
+                config.get("image_generation", "api_key"),
+                "",
+            )
+            lab_warning.assert_not_called()
+            start_worker.assert_called_once()
+            lab.close()
+
     def test_first_run_imports_package_and_character_frames_load(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:

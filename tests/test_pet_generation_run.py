@@ -121,6 +121,57 @@ class PetGenerationRunStoreTests(unittest.TestCase):
                     request={},
                     task_ids=["canonical"],
                 )
+            with self.assertRaises(PetGenerationRunError):
+                store.create(
+                    run_id="safe-run",
+                    request={},
+                    task_ids=["../outside"],
+                )
+
+    def test_task_artifacts_must_stay_inside_run_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory))
+            run = store.create(
+                run_id="artifact-safety",
+                request={},
+                task_ids=["canonical"],
+            )
+
+            for artifact in (
+                "../outside.png",
+                r"C:\outside.png",
+                "images/file:stream.png",
+                "images/trailing.",
+                "images/CON.png",
+                "images/bad?.png",
+            ):
+                with self.subTest(artifact=artifact):
+                    with self.assertRaises(PetGenerationRunError):
+                        store.update_task(
+                            run["id"],
+                            "canonical",
+                            "complete",
+                            artifact=artifact,
+                        )
+
+    def test_corrupt_task_details_are_rejected_when_loading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory))
+            run = store.create(
+                run_id="corrupt-task",
+                request={},
+                task_ids=["canonical"],
+            )
+            manifest = store.workspace(run["id"]) / "run.json"
+            record = json.loads(manifest.read_text(encoding="utf-8"))
+            record["tasks"]["canonical"]["status"] = "unknown"
+            manifest.write_text(json.dumps(record), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                PetGenerationRunError,
+                "详情状态无效",
+            ):
+                store.load(run["id"])
 
     def test_list_runs_orders_newest_first_and_skips_corrupt_records(self):
         with tempfile.TemporaryDirectory() as directory:

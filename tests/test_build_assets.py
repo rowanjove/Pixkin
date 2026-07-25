@@ -92,6 +92,13 @@ class ReleaseAssetTests(unittest.TestCase):
     def test_windows_powershell_build_script_has_utf8_bom(self):
         content = (ROOT / "scripts" / "build_release.ps1").read_bytes()
         self.assertTrue(content.startswith(b"\xef\xbb\xbf"))
+        text = content.decode("utf-8-sig")
+        self.assertIn("Assert-LastExitCode", text)
+        self.assertIn("验收重建后的发布资产", text)
+        self.assertLess(
+            text.index("-m scripts.create_sample_pack"),
+            text.index("tests\\test_build_assets.py"),
+        )
 
 
 if __name__ == "__main__":

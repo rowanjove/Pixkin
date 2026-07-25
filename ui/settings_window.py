@@ -921,6 +921,14 @@ class SettingsWindow(QDialog):
         api_key = self.api_key_input.text().strip()
         previous_api_key = SecretStore.get_api_key()
         credential_saved = SecretStore.set_api_key(api_key)
+        credential_available = bool(
+            credential_saved
+            or (
+                api_key
+                and previous_api_key
+                and previous_api_key == api_key
+            )
+        )
         if not api_key and not credential_saved:
             restored = SecretStore.set_api_key(previous_api_key)
             QMessageBox.critical(
@@ -951,7 +959,7 @@ class SettingsWindow(QDialog):
             "api": {
                 "base_url": base_url,
                 "model": model,
-                "api_key": "" if credential_saved else api_key,
+                "api_key": "" if credential_available else api_key,
             },
             "pet": {
                 "system_prompt": self.prompt_input.toPlainText().strip(),
@@ -995,7 +1003,7 @@ class SettingsWindow(QDialog):
                 + "请检查磁盘空间和目录权限。",
             )
             return
-        if api_key and not credential_saved:
+        if api_key and not credential_available:
             QMessageBox.warning(
                 self,
                 "凭据保存受限",
