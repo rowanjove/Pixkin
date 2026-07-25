@@ -1,4 +1,6 @@
 import html
+import random
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRectF, QTimer
@@ -257,6 +259,8 @@ class ChatBubbleWindow(QWidget):
     send_message_signal = pyqtSignal(str)
     settings_requested = pyqtSignal()
     pet_lab_requested = pyqtSignal()
+    history_requested = pyqtSignal()
+    new_session_requested = pyqtSignal()
 
     def __init__(self, config_manager=None, parent=None):
         super().__init__(parent)
@@ -355,6 +359,9 @@ class ChatBubbleWindow(QWidget):
             QLabel#toolPill {
                 color: #AEB8CC; background: #1C2536; border: 1px solid #303C55;
                 border-radius: 12px; padding: 6px 11px; font-size: 10px;
+            }
+            QLabel#dateDivider {
+                color: #718097; font-size: 9px; padding: 5px 8px;
             }
             QLabel#errorPill {
                 color: #FFC1B4; background: #38231F; border: 1px solid #6B3A31;
@@ -554,6 +561,7 @@ class ChatBubbleWindow(QWidget):
             QLabel#toolPill {
                 color: #46566A; background: #E9EEF5; border-color: #D5DEE9;
             }
+            QLabel#dateDivider { color: #667085; }
             QLabel#errorPill {
                 color: #A43B29; background: #FFF0EC; border-color: #F2C9BF;
             }
@@ -647,15 +655,48 @@ class ChatBubbleWindow(QWidget):
             "role": role,
             "content": content,
             "metadata": metadata or {},
+            "created_at": datetime.now().astimezone().isoformat(
+                timespec="milliseconds"
+            ),
         })
         self._stream_index = None
         self._render_messages()
+        return self._messages[-1]
 
     def start_assistant_message(self):
         self._stream_update_timer.stop()
-        self._messages.append({"role": "assistant", "content": ""})
+        self._messages.append({
+            "role": "assistant",
+            "content": "",
+            "metadata": {},
+            "created_at": datetime.now().astimezone().isoformat(
+                timespec="milliseconds"
+            ),
+        })
         self._stream_index = len(self._messages) - 1
         self._render_messages()
+
+    def load_messages(self, messages):
+        self._stream_update_timer.stop()
+        self._stream_index = None
+        self._stream_row = None
+        self._messages = [
+            {
+                "role": str(item.get("role") or "system"),
+                "content": str(item.get("content") or ""),
+                "metadata": (
+                    item.get("metadata")
+                    if isinstance(item.get("metadata"), dict)
+                    else {}
+                ),
+                "created_at": str(item.get("created_at") or ""),
+            }
+            for item in messages or []
+        ]
+        self._render_messages()
+
+    def message_snapshot(self):
+        return [dict(item) for item in self._messages]
 
     def append_chunk(self, chunk: str):
         if self._stream_index is None:
@@ -711,7 +752,7 @@ class ChatBubbleWindow(QWidget):
         self, platform_name: str, anchor_name: str, title: str
     ):
         live_title = str(title or "").strip() or "主播正在直播"
-        self.append_message(
+        message = self.append_message(
             "alert",
             f"{anchor_name} 开播了\n{live_title}",
             {
@@ -723,6 +764,7 @@ class ChatBubbleWindow(QWidget):
         )
         self.show()
         self.raise_()
+        return message
 
     def _restore_input_focus(self):
         self._focus_after_response = False
@@ -783,7 +825,16 @@ class ChatBubbleWindow(QWidget):
             self.messages_layout.addWidget(self._welcome_widget())
             self.messages_layout.addStretch()
         else:
+            previous_day = None
             for index, item in enumerate(self._messages):
+                created_at = str(item.get("created_at") or "")
+                day = created_at[:10] if len(created_at) >= 10 else ""
+                if day and day != previous_day:
+                    divider = QLabel(self._friendly_day(day))
+                    divider.setObjectName("dateDivider")
+                    divider.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.messages_layout.addWidget(divider)
+                    previous_day = day
                 message = MessageRow(
                     item["role"],
                     item["content"] or "•••",
@@ -800,6 +851,19 @@ class ChatBubbleWindow(QWidget):
             self.messages_layout.addStretch()
         self._render_transcript()
         self._schedule_scroll_to_bottom()
+
+    @staticmethod
+    def _friendly_day(day: str) -> str:
+        today = datetime.now().astimezone().date()
+        try:
+            value = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError:
+            return day
+        if value == today:
+            return "今天"
+        if (today - value).days == 1:
+            return "昨天"
+        return value.strftime("%Y年%m月%d日")
 
     def _flush_stream_update(self):
         if self._stream_index is None:
@@ -840,16 +904,39 @@ class ChatBubbleWindow(QWidget):
     def _build_tool_menu(self):
         menu = QMenu(self)
         heading = QAction(
-            f"AI 工具 · {len(self._available_tool_names)} 项已连接",
+            f"✨ 和{self._character_name}玩点什么",
             menu,
         )
         heading.setEnabled(False)
         menu.addAction(heading)
         menu.addSeparator()
 
+        for label, mode, payload in (
+            ("💭 开启一段新话题", "new_session", None),
+            ("🕰 打开聊天时光胶囊", "history", None),
+            (
+                "🎲 来个随机脑洞",
+                "random",
+                (
+                    "给我一个一分钟就能玩的奇怪脑洞挑战。",
+                    "我们来玩一句话世界观接龙，你先开始。",
+                    "随机选两个完全无关的东西，帮我发明一个新玩意。",
+                    "给今天设计一个荒诞但可完成的小任务。",
+                ),
+            ),
+            ("🌙 抽一张今日心情签", "send", "给我抽一张今天的心情签，写上签名、解读和一个小行动。"),
+            ("🧠 开启反向提问局", "send", "接下来由你问我三个有趣的问题，一次只问一个。"),
+            ("🎨 玩灵感接龙", "send", "和我玩灵感接龙：你先给出一个画面，我接着补充。"),
+            ("🚀 把我夸到起飞", "send", "根据我们聊过的内容，用具体又不油腻的方式夸夸我。"),
+        ):
+            self._add_menu_action(menu, label, mode, payload)
+
+        toolbox = menu.addMenu(
+            f"🧰 实用百宝箱 · {len(self._available_tool_names)} 项"
+        )
         shortcuts = (
             (
-                "list_available_tools", "查看全部工具",
+                "list_available_tools", "看看百宝箱里有什么",
                 "请调用 list_available_tools 工具，介绍目前可用的能力。", False,
             ),
             (
@@ -865,11 +952,11 @@ class ChatBubbleWindow(QWidget):
                 "请调用 get_disk_usage 工具查看磁盘空间。", False,
             ),
             (
-                "calculate_expression", "计算算式…",
+                "calculate_expression", "神算子：计算算式…",
                 "请使用 calculate_expression 工具计算：", True,
             ),
             (
-                "open_url", "打开网页…",
+                "open_url", "传送门：打开网页…",
                 "请使用 open_url 工具打开这个网页：https://", True,
             ),
             (
@@ -893,20 +980,27 @@ class ChatBubbleWindow(QWidget):
         for tool_name, label, prompt, prefill in shortcuts:
             if tool_name not in self._available_tool_names:
                 continue
-            action = QAction(label, menu)
-            action.setData(("prefill" if prefill else "send", prompt))
-            action.triggered.connect(self._on_tool_action_triggered)
-            menu.addAction(action)
+            self._add_menu_action(
+                toolbox,
+                label,
+                "prefill" if prefill else "send",
+                prompt,
+            )
             added = True
         if not added:
-            unavailable = QAction("AI 工具尚未连接", menu)
+            unavailable = QAction("AI 工具尚未连接", toolbox)
             unavailable.setEnabled(False)
-            menu.addAction(unavailable)
+            toolbox.addAction(unavailable)
         menu.addSeparator()
-        studio = QAction("孵化新伙伴", menu)
-        studio.triggered.connect(self.pet_lab_requested)
-        menu.addAction(studio)
+        self._add_menu_action(menu, "🥚 去伙伴工坊孵化新朋友", "studio", None)
         return menu
+
+    def _add_menu_action(self, menu, label, mode, payload):
+        action = QAction(label, menu)
+        action.setData((mode, payload))
+        action.triggered.connect(self._on_tool_action_triggered)
+        menu.addAction(action)
+        return action
 
     def _show_tool_menu(self):
         menu = self._build_tool_menu()
@@ -921,6 +1015,14 @@ class ChatBubbleWindow(QWidget):
             self._prefill_prompt(prompt)
         elif mode == "send":
             self._send_prompt(prompt)
+        elif mode == "random":
+            self._send_prompt(random.choice(prompt))
+        elif mode == "history":
+            self.history_requested.emit()
+        elif mode == "new_session":
+            self.new_session_requested.emit()
+        elif mode == "studio":
+            self.pet_lab_requested.emit()
 
     def _prefill_prompt(self, value: str):
         if not self.input_field.isEnabled():

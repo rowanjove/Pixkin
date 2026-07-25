@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from core.ai_engine import AiWorkerThread
 from core.app_logging import configure_logging
+from core.chat_history_store import ChatHistoryStore
 from core.config import ConfigManager
 from core.secrets import (
     CHAT_TARGET, LEGACY_TARGET, SecretStore
@@ -289,6 +290,80 @@ class ToolRegistryTests(unittest.TestCase):
             "Error executing tool",
             registry.execute_tool("open_url", {"url": "file:///secret.txt"}),
         )
+
+
+class ChatHistoryStoreTests(unittest.TestCase):
+    def test_characters_keep_independent_active_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ChatHistoryStore(Path(directory) / "history.sqlite3")
+            shanshan = store.get_or_create_active_session(
+                "shanshan", "山山"
+            )
+            store.add_message(shanshan, "user", "山山的消息")
+            linlin = store.get_or_create_active_session(
+                "linlin", "凛凛"
+            )
+            store.add_message(linlin, "user", "凛凛的消息")
+
+            self.assertEqual(
+                store.get_or_create_active_session("shanshan", "山山"),
+                shanshan,
+            )
+            self.assertEqual(
+                [item["content"] for item in store.session_messages(shanshan)],
+                ["山山的消息"],
+            )
+            self.assertEqual(
+                [item["content"] for item in store.session_messages(linlin)],
+                ["凛凛的消息"],
+            )
+
+    def test_new_session_preserves_old_history_and_context_filters_roles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ChatHistoryStore(Path(directory) / "history.sqlite3")
+            first = store.create_session("shanshan", "山山")
+            store.add_message(first, "user", "你好")
+            store.add_message(first, "system", "正在使用工具")
+            store.add_message(first, "assistant", "你好呀")
+            second = store.create_session("shanshan", "山山")
+
+            self.assertNotEqual(first, second)
+            self.assertEqual(
+                store.context_messages(first),
+                [
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "content": "你好呀"},
+                ],
+            )
+            self.assertEqual(store.session_messages(second), [])
+            self.assertEqual(
+                store.get_or_create_active_session("shanshan", "山山"),
+                second,
+            )
+
+    def test_history_can_be_deleted_by_day_without_touching_other_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ChatHistoryStore(Path(directory) / "history.sqlite3")
+            first = store.create_session("shanshan", "山山")
+            second = store.create_session("linlin", "凛凛")
+            store.add_message(
+                first, "user", "山山今天", created_at="2026-07-25T10:00:00+08:00"
+            )
+            store.add_message(
+                first, "user", "山山昨天", created_at="2026-07-24T10:00:00+08:00"
+            )
+            store.add_message(
+                second, "user", "凛凛今天", created_at="2026-07-25T11:00:00+08:00"
+            )
+
+            self.assertEqual(
+                store.delete_date("2026-07-25", "shanshan"), 1
+            )
+            remaining = store.list_messages()
+            self.assertEqual(
+                {item["content"] for item in remaining},
+                {"山山昨天", "凛凛今天"},
+            )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from PyQt6.QtGui import (
 
 from core.ai_engine import AiWorkerThread
 from core.app_logging import configure_logging
+from core.chat_history_store import ChatHistoryStore
 from core.character_package import (
     DEFAULT_PACKAGE_ID, CharacterPackageManager
 )
@@ -24,6 +25,7 @@ from core.tool_registry import ToolRegistry
 from core.version import VERSION
 from core.windows_integration import set_start_with_windows
 from ui.onboarding_window import FirstRunWindow
+from ui.history_window import HistoryWindow
 from ui.pet_lab_window import PetLabWindow
 from ui.pet_window import PetWindow
 from ui.settings_window import SettingsWindow
@@ -115,12 +117,26 @@ class DesktopPetApp:
             return
 
         self.tool_registry = ToolRegistry()
+        self.chat_store = ChatHistoryStore()
         self.pet_window = PetWindow(self.config_mgr, active_package)
         self.pet_window.chat_window.set_tool_schemas(
             self.tool_registry.get_tools_schema()
         )
-        self.chat_history_list = []
+        self.active_character_id = active_package.package_id
+        self.active_character_name = active_package.name
+        self.current_session_id = self.chat_store.get_or_create_active_session(
+            active_package.package_id, active_package.name
+        )
+        self.chat_history_list = self.chat_store.context_messages(
+            self.current_session_id
+        )
+        self._trim_chat_history()
+        self.pet_window.chat_window.load_messages(
+            self.chat_store.session_messages(self.current_session_id)
+        )
         self.ai_worker = None
+        self._ai_session_id = None
+        self._history_window = None
         self.live_monitor = None
         self._room_states = {}
 
@@ -133,6 +149,12 @@ class DesktopPetApp:
         )
         self.pet_window.chat_window.pet_lab_requested.connect(
             self._open_pet_lab
+        )
+        self.pet_window.chat_window.history_requested.connect(
+            self._open_history
+        )
+        self.pet_window.chat_window.new_session_requested.connect(
+            self._start_new_chat_session
         )
         self._setup_live_monitor()
         self.pet_window.show()
@@ -391,8 +413,14 @@ class DesktopPetApp:
             duration_ms=3200,
         )
         platform_name = "B站" if platform == "bilibili" else "抖音"
-        self.pet_window.chat_window.show_live_alert(
+        message = self.pet_window.chat_window.show_live_alert(
             platform_name, anchor_name, title
+        )
+        self._store_message(
+            message["role"],
+            message["content"],
+            message.get("metadata"),
+            message.get("created_at"),
         )
         self.pet_window._update_chat_position()
         self.tray.showMessage(
@@ -406,6 +434,7 @@ class DesktopPetApp:
         if self.ai_worker and self.ai_worker.isRunning():
             return
         self.chat_history_list.append({"role": "user", "content": user_text})
+        self._store_message("user", user_text)
         self._trim_chat_history()
         self.pet_window.animator.set_state(PetState.LISTENING)
         self.pet_window.chat_window.set_busy(True)
@@ -419,6 +448,7 @@ class DesktopPetApp:
             messages=list(self.chat_history_list),
             tool_registry=self.tool_registry,
         )
+        self._ai_session_id = getattr(self, "current_session_id", None)
         self.ai_worker.chunk_received.connect(self._on_ai_chunk)
         self.ai_worker.tool_executing.connect(self._on_tool_executing)
         self.ai_worker.finished_response.connect(self._on_ai_finished)
@@ -454,10 +484,20 @@ class DesktopPetApp:
             PetState.WORKING, complete_current=True
         )
         self.pet_window.chat_window.append_message("system", message)
+        self._store_message(
+            "system",
+            message,
+            session_id=getattr(self, "_ai_session_id", None),
+        )
 
     def _on_ai_finished(self, final_text: str):
         self.chat_history_list.append(
             {"role": "assistant", "content": final_text}
+        )
+        self._store_message(
+            "assistant",
+            final_text,
+            session_id=getattr(self, "_ai_session_id", None),
         )
         self._trim_chat_history()
         self.pet_window.chat_window.complete_stream()
@@ -473,6 +513,11 @@ class DesktopPetApp:
         LOGGER.warning("AI 请求失败: %s", error_message)
         self.pet_window.chat_window.cancel_stream()
         self.pet_window.chat_window.append_message("error", error_message)
+        self._store_message(
+            "error",
+            error_message,
+            session_id=getattr(self, "_ai_session_id", None),
+        )
         self.pet_window.chat_window.set_busy(False)
         self.pet_window.animator.request_state(
             PetState.FAILED,
@@ -484,9 +529,36 @@ class DesktopPetApp:
     def _cleanup_ai_worker(self, worker):
         if self.ai_worker is worker:
             self.ai_worker = None
+            self._ai_session_id = None
         worker.deleteLater()
         if getattr(self, "_quitting", False):
             self._maybe_finish_quit()
+
+    def _store_message(
+        self,
+        role,
+        content,
+        metadata=None,
+        created_at=None,
+        session_id=None,
+    ):
+        store = getattr(self, "chat_store", None)
+        target_session = session_id or getattr(
+            self, "current_session_id", None
+        )
+        if store is None or not target_session:
+            return None
+        try:
+            return store.add_message(
+                target_session,
+                role,
+                content,
+                metadata,
+                created_at,
+            )
+        except Exception as exc:
+            LOGGER.warning("聊天历史写入失败: %s", exc)
+            return None
 
     def _trim_chat_history(self):
         """保留最近的完整上下文，避免请求无限增长直至超过模型限制。"""
@@ -514,10 +586,139 @@ class DesktopPetApp:
             self.chat_history_list.pop(0)
 
     def _reset_chat_context(self):
-        self.chat_history_list.clear()
-        self.pet_window.chat_window.append_message(
-            "system", "角色或人设已更新，对话上下文已重新开始。"
+        self._start_new_chat_session()
+
+    def _cancel_ai_for_context_switch(self):
+        worker = getattr(self, "ai_worker", None)
+        if worker is None or not worker.isRunning():
+            return
+        for signal, callback in (
+            (worker.chunk_received, self._on_ai_chunk),
+            (worker.tool_executing, self._on_tool_executing),
+            (worker.finished_response, self._on_ai_finished),
+            (worker.error_occurred, self._on_ai_error),
+        ):
+            try:
+                signal.disconnect(callback)
+            except (TypeError, RuntimeError):
+                pass
+        worker.cancel()
+        self.ai_worker = None
+        self._ai_session_id = None
+        self.pet_window.chat_window.cancel_stream()
+        self.pet_window.chat_window.set_busy(False)
+
+    def _activate_chat_for_package(self, package):
+        if package is None:
+            return
+        previous_id = getattr(self, "active_character_id", None)
+        if previous_id and previous_id != package.package_id:
+            self._cancel_ai_for_context_switch()
+        self.active_character_id = package.package_id
+        self.active_character_name = package.name
+        store = getattr(self, "chat_store", None)
+        if store is None:
+            self.chat_history_list = []
+            return
+        self.current_session_id = (
+            store.get_or_create_active_session(
+                package.package_id, package.name
+            )
         )
+        self._reload_current_chat()
+
+    def _reload_current_chat(self):
+        store = getattr(self, "chat_store", None)
+        if store is None:
+            self.chat_history_list = []
+            self.pet_window.chat_window.load_messages([])
+            return
+        next_session_id = store.get_or_create_active_session(
+            self.active_character_id, self.active_character_name
+        )
+        if (
+            getattr(self, "current_session_id", None)
+            and self.current_session_id != next_session_id
+        ):
+            self._cancel_ai_for_context_switch()
+        self.current_session_id = next_session_id
+        self.chat_history_list = store.context_messages(
+            self.current_session_id
+        )
+        self._trim_chat_history()
+        self.pet_window.chat_window.load_messages(
+            store.session_messages(self.current_session_id)
+        )
+        self._sync_history_window()
+
+    def _start_new_chat_session(self):
+        store = getattr(self, "chat_store", None)
+        if store is None:
+            self.chat_history_list = []
+            self.pet_window.chat_window.load_messages([])
+            return
+        self._cancel_ai_for_context_switch()
+        self.current_session_id = store.create_session(
+            self.active_character_id, self.active_character_name
+        )
+        self.chat_history_list = []
+        self.pet_window.chat_window.load_messages([])
+        self._sync_history_window()
+
+    def _sync_history_window(self):
+        window = getattr(self, "_history_window", None)
+        if window is None:
+            return
+        try:
+            window.set_context(
+                self.active_character_id,
+                self.active_character_name,
+                self.current_session_id,
+            )
+        except RuntimeError:
+            self._history_window = None
+
+    def _open_history(self):
+        current = getattr(self, "_history_window", None)
+        if current is not None:
+            try:
+                current.set_context(
+                    self.active_character_id,
+                    self.active_character_name,
+                    self.current_session_id,
+                )
+                current.show()
+                current.raise_()
+                current.activateWindow()
+                return current
+            except RuntimeError:
+                self._history_window = None
+        dialog = HistoryWindow(
+            self.chat_store,
+            self.active_character_id,
+            self.active_character_name,
+            self.current_session_id,
+            self.config_mgr,
+        )
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.history_changed.connect(self._reload_current_chat)
+        dialog.new_session_requested.connect(
+            self._start_new_chat_session
+        )
+        dialog.destroyed.connect(
+            lambda _object=None, expected=dialog:
+            self._clear_history_window(expected)
+        )
+        self._history_window = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _clear_history_window(self, expected):
+        if getattr(self, "_history_window", None) is expected:
+            self._history_window = None
 
     def _open_settings(self):
         current = getattr(self, "_settings_window", None)
@@ -561,15 +762,19 @@ class DesktopPetApp:
             package = self.package_manager.get_active()
             if package:
                 self.pet_window.set_character(package)
-        prompt_changed = (
-            self.config_mgr.get("pet", "system_prompt", "") != previous_prompt
-        )
-        if dialog.character_changed or prompt_changed:
-            self._reset_chat_context()
+                self._activate_chat_for_package(package)
         if int(result) != int(QDialog.DialogCode.Accepted):
             return
         package = self.package_manager.get_active()
         self.pet_window.set_character(package)
+        if not dialog.character_changed:
+            self._activate_chat_for_package(package)
+            prompt_changed = (
+                self.config_mgr.get("pet", "system_prompt", "")
+                != previous_prompt
+            )
+            if prompt_changed:
+                self._start_new_chat_session()
         self.pet_window.chat_window.set_user_profile(
             self.config_mgr.get("user", "display_name", "我"),
             self.config_mgr.get("user", "avatar_path", ""),
@@ -598,8 +803,8 @@ class DesktopPetApp:
             return
         package = dialog.generated_package or self.package_manager.get_active()
         if package:
-            self._reset_chat_context()
             self.pet_window.set_character(package)
+            self._activate_chat_for_package(package)
             self.pet_window.play_contextual_alert(
                 PetState.ALERTING_IMPORTANT,
                 duration_ms=2600,
