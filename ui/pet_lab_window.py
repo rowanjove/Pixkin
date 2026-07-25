@@ -18,6 +18,7 @@ from core.pet_generation_run import (
     PetGenerationRunError,
     PetGenerationRunStore,
 )
+from core.pet_generation_diagnostics import PetGenerationDiagnostics
 from core.pet_generator import PetGenerationWorker
 from core.secrets import SecretStore
 from ui.theme import resolved_theme
@@ -313,6 +314,20 @@ class PetLabWindow(QDialog):
         resume_row.addWidget(self.continue_btn)
         layout.addLayout(resume_row)
 
+        health_row = QHBoxLayout()
+        self.run_health = QLabel("选择未完成任务后显示批次健康状态。")
+        self.run_health.setObjectName("muted")
+        self.run_health.setWordWrap(True)
+        self.diagnostic_btn = QPushButton("查看诊断")
+        self.diagnostic_btn.setObjectName("secondary")
+        self.diagnostic_btn.setEnabled(False)
+        self.diagnostic_btn.clicked.connect(
+            self._show_generation_diagnostics
+        )
+        health_row.addWidget(self.run_health, 1)
+        health_row.addWidget(self.diagnostic_btn)
+        layout.addLayout(health_row)
+
         retry_row = QHBoxLayout()
         self.retry_task_input = QComboBox()
         self.retry_task_input.setToolTip("选择要重试或切换历史版本的任务")
@@ -528,6 +543,13 @@ class PetLabWindow(QDialog):
     def _on_progress(self, value: int, text: str):
         self.progress.setValue(value)
         self.status.setText(text)
+        if self.active_run_id:
+            try:
+                self._update_run_health(
+                    self.run_store.load(self.active_run_id)
+                )
+            except PetGenerationRunError:
+                pass
 
     def _on_error(self, message: str):
         self.status.setText("孵化没有完成。请检查接口、模型和额度后重试。")
@@ -1085,13 +1107,21 @@ class PetLabWindow(QDialog):
             self.retry_task_input.addItem("没有可用的任务工具", None)
             self.retry_btn.setEnabled(False)
             self.candidate_btn.setEnabled(False)
+            self.diagnostic_btn.setEnabled(False)
+            self.run_health.setText(
+                "选择未完成任务后显示批次健康状态。"
+            )
             return
         try:
             record = self.run_store.load(run_id)
         except PetGenerationRunError:
             self.retry_btn.setEnabled(False)
             self.candidate_btn.setEnabled(False)
+            self.diagnostic_btn.setEnabled(False)
+            self.run_health.setText("任务记录无法读取。")
             return
+        self._update_run_health(record)
+        self.diagnostic_btn.setEnabled(True)
         for task_id, task in record["tasks"].items():
             candidate_count = len(task.get("candidates", []))
             if (
@@ -1109,6 +1139,74 @@ class PetLabWindow(QDialog):
         if self.retry_task_input.count() == 0:
             self.retry_task_input.addItem("没有可用的任务工具", None)
         self._on_task_tool_changed()
+
+    def _update_run_health(self, record):
+        health = PetGenerationDiagnostics.summarize(record)
+        self.run_health.setText(
+            PetGenerationDiagnostics.compact_text(health)
+        )
+
+    def _show_generation_diagnostics(self):
+        run_id = self.run_input.currentData()
+        if not run_id:
+            return
+        try:
+            record = self.run_store.load(run_id)
+        except PetGenerationRunError as exc:
+            self._on_error(str(exc))
+            return
+        report = PetGenerationDiagnostics.summarize(record)
+        api = report["api"]
+        tasks = report["tasks"]
+        preflight = report.get("preflight") or {}
+        categories = report["errors"]["categories"]
+        messages = [
+            PetGenerationDiagnostics.compact_text(report),
+            (
+                f"剩余真实调用：{api['remaining_calls']}；"
+                f"成功/失败调用："
+                f"{api['successful_calls']}/{api['failed_calls']}"
+            ),
+            (
+                f"待处理任务：{', '.join(tasks['remaining_ids'][:8])}"
+                + (
+                    "…"
+                    if len(tasks["remaining_ids"]) > 8
+                    else ""
+                )
+            ),
+            (
+                "能力预检："
+                + str(preflight.get("status", "尚未执行"))
+                + (
+                    f"（{preflight.get('note')}）"
+                    if preflight.get("note")
+                    else ""
+                )
+            ),
+        ]
+        if categories:
+            messages.append(
+                "错误分类："
+                + "、".join(
+                    f"{name} × {count}"
+                    for name, count in categories.items()
+                )
+            )
+        if report["errors"].get("latest"):
+            messages.append(
+                "最近错误：" + str(report["errors"]["latest"])
+            )
+        artifact = record.get("artifacts", {}).get(
+            "generation_diagnostic_report"
+        )
+        if artifact:
+            messages.append("JSON 报告：" + str(artifact))
+        QMessageBox.information(
+            self,
+            "生成批次诊断",
+            "\n".join(messages),
+        )
 
     def _on_task_tool_changed(self, _index=None):
         run_id = self.run_input.currentData()

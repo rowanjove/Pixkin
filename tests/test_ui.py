@@ -240,6 +240,8 @@ class UiSmokeTests(unittest.TestCase):
 
             self.assertIn("API 1/8", lab.run_input.currentText())
             self.assertIn("1.5s", lab.run_input.currentText())
+            self.assertIn("生成失败", lab.run_health.text())
+            self.assertTrue(lab.diagnostic_btn.isEnabled())
             lab.close()
 
     def test_chat_escapes_user_html(self):
