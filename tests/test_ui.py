@@ -147,12 +147,20 @@ class UiSmokeTests(unittest.TestCase):
                 self.assertFalse(rendered.isNull())
 
                 reveal = pet._edge_reveal(side)
-                self.assertGreaterEqual(
+                design_reveal = pet._dedicated_edge_design_reveal(side)
+                self.assertLess(
+                    design_reveal,
+                    pet.EDGE_ART_SIZE,
+                )
+                self.assertEqual(
                     reveal,
-                    round(
-                        pet.DEDICATED_EDGE_REVEAL
-                        * pet.width()
-                        / pet.DESIGN_SIZE
+                    max(
+                        pet.peek_size,
+                        round(
+                            design_reveal
+                            * pet.width()
+                            / pet.DESIGN_SIZE
+                        ),
                     ),
                 )
                 if side == "left":
@@ -182,6 +190,20 @@ class UiSmokeTests(unittest.TestCase):
                     self.assertEqual(subject.top(), visible.top())
                 else:
                     self.assertEqual(subject.bottom(), visible.bottom())
+
+            pet.dock_side = "left"
+            pet.is_docked = True
+            target = pet._dock_target("left")
+            pet.move(*target)
+            with patch.object(pet, "_animate_move") as animate:
+                pet._show_edge_hover()
+                self.assertEqual(
+                    pet.animator.current_state,
+                    PetState.EDGE_HOVER_LEFT,
+                )
+                animate.assert_not_called()
+                pet._show_edge_idle()
+                animate.assert_not_called()
 
             pet.close()
             pet.chat_window.close()

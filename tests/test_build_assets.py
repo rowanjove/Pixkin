@@ -103,7 +103,9 @@ class ReleaseAssetTests(unittest.TestCase):
             art_side = "right" if side == "left" else "left"
             prefix = f"images/edge/{art_side}-"
             enter = animations[f"edge_enter_{side}"]["source"]["files"]
+            hover = animations[f"edge_hover_{side}"]
             exit_ = animations[f"edge_exit_{side}"]["source"]["files"]
+            self.assertEqual(hover["playback"], "once")
             self.assertEqual(
                 enter,
                 [f"{prefix}{index:02d}.png" for index in range(4)],
