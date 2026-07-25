@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
+import zipfile
 from collections import Counter
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 
 MIRROR_TARGETS = {
@@ -23,6 +27,18 @@ REVIEW_STAGES = {
     "core_review",
     "qa_review",
     "final_review",
+}
+ISSUE_REPORT_KEYS = (
+    "qa_report",
+    "static_qa_report",
+    "animation_qa_report",
+)
+SENSITIVE_KEYS = {
+    "api_key",
+    "pet_name",
+    "personality",
+    "style_notes",
+    "reference_paths",
 }
 
 
@@ -240,6 +256,371 @@ class PetGenerationDiagnostics:
             f" · API {usage}"
             f" · {eta_copy}"
         )
+
+    @classmethod
+    def technical_summary(cls, report):
+        api = report["api"]
+        tasks = report["tasks"]
+        preflight = report.get("preflight") or {}
+        errors = report.get("errors") or {}
+        categories = errors.get("categories") or {}
+        budget = api.get("budget")
+        usage = (
+            f"{api['used']}/{budget}"
+            if budget is not None
+            else str(api["used"])
+        )
+        lines = [
+            "Pixkin 伙伴工坊技术摘要",
+            f"健康状态：{report['health']}",
+            f"流程阶段：{report['stage']}",
+            f"任务完成：{tasks['complete']}/{tasks['total']}",
+            f"API 调用：{usage}",
+            f"剩余真实调用：{api['remaining_calls']}",
+            (
+                "预计剩余："
+                + (
+                    cls.format_duration(
+                        api.get("estimated_remaining_ms")
+                    )
+                    or "尚无数据"
+                )
+            ),
+            (
+                "能力预检："
+                + str(preflight.get("status", "尚未执行"))
+            ),
+            (
+                "成功/失败调用："
+                f"{api['successful_calls']}/{api['failed_calls']}"
+            ),
+        ]
+        if categories:
+            lines.append(
+                "错误分类："
+                + "、".join(
+                    f"{name} × {count}"
+                    for name, count in sorted(categories.items())
+                )
+            )
+        return "\n".join(lines)
+
+    @classmethod
+    def build_issue_bundle(
+        cls,
+        record,
+        *,
+        workspace: Path,
+        destination: Path,
+    ):
+        workspace = Path(workspace).resolve()
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        anonymous_id = sha256(
+            str(record.get("id", "")).encode("utf-8")
+        ).hexdigest()[:12]
+        request = record.get("request") or {}
+        redactions = []
+        for key in SENSITIVE_KEYS:
+            value = request.get(key)
+            if isinstance(value, (list, tuple)):
+                redactions.extend(str(item) for item in value if item)
+            elif value:
+                redactions.append(str(value))
+        diagnostic = cls._sanitize_value(
+            cls.summarize(record),
+            workspace=workspace,
+            redactions=redactions,
+        )
+        diagnostic["run_id"] = f"anonymous-{anonymous_id}"
+        diagnostic["errors"]["latest"] = (
+            "<error-recorded>"
+            if diagnostic["errors"].get("latest")
+            else None
+        )
+        diagnostic["errors"]["failed_tasks"] = {
+            task_id: "<error-recorded>"
+            for task_id, error in diagnostic["errors"][
+                "failed_tasks"
+            ].items()
+            if error
+        }
+        run_summary = {
+            "schema_version": 1,
+            "anonymous_run_id": f"anonymous-{anonymous_id}",
+            "status": str(record.get("status", "pending")),
+            "stage": str(record.get("stage", "created")),
+            "request": {
+                key: request.get(key)
+                for key in (
+                    "mode",
+                    "image_model",
+                    "image_quality",
+                    "allow_horizontal_mirror",
+                    "planned_api_calls",
+                    "max_api_calls",
+                    "capability_preflight",
+                )
+                if key in request
+            },
+            "tasks": {
+                task_id: {
+                    "status": task.get("status"),
+                    "attempts": task.get("attempts", 0),
+                    "candidate_count": len(
+                        task.get("candidates", [])
+                    ),
+                    "has_error": bool(task.get("error")),
+                }
+                for task_id, task in (record.get("tasks") or {}).items()
+                if isinstance(task, dict)
+            },
+            "metrics": record.get("metrics") or {"api_calls": []},
+        }
+        run_summary = cls._sanitize_value(
+            run_summary,
+            workspace=workspace,
+            redactions=redactions,
+        )
+        documents = {
+            "diagnostic.json": diagnostic,
+            "run-summary.json": run_summary,
+        }
+        artifacts = record.get("artifacts") or {}
+        included_reports = []
+        for key in ISSUE_REPORT_KEYS:
+            source = cls._safe_json_artifact(
+                artifacts.get(key),
+                workspace=workspace,
+            )
+            if source is None:
+                continue
+            try:
+                payload = json.loads(source.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            name = f"reports/{key}.json"
+            documents[name] = cls._sanitize_value(
+                cls._qa_report_excerpt(payload),
+                workspace=workspace,
+                redactions=redactions,
+            )
+            included_reports.append(name)
+        manifest = {
+            "schema_version": 1,
+            "created_at": _utc_now(),
+            "anonymous_run_id": f"anonymous-{anonymous_id}",
+            "privacy": {
+                "images_included": False,
+                "reference_images_included": False,
+                "api_keys_included": False,
+                "freeform_character_fields_included": False,
+            },
+            "contents": sorted([
+                "manifest.json",
+                *documents,
+            ]),
+            "included_reports": included_reports,
+        }
+        documents["manifest.json"] = manifest
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".pixkin-issue-",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary)
+        try:
+            with zipfile.ZipFile(
+                temporary_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            ) as archive:
+                for name, payload in sorted(documents.items()):
+                    archive.writestr(
+                        name,
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            indent=2,
+                        ).encode("utf-8"),
+                    )
+            os.replace(temporary_path, destination)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+        return {
+            "path": str(destination),
+            "anonymous_run_id": f"anonymous-{anonymous_id}",
+            "contents": manifest["contents"],
+        }
+
+    @staticmethod
+    def _qa_report_excerpt(payload):
+        if not isinstance(payload, dict):
+            return {}
+        excerpt = {
+            key: payload[key]
+            for key in (
+                "schema_version",
+                "generated_at",
+                "passed",
+                "expected_states",
+                "summary",
+                "checks",
+            )
+            if key in payload
+        }
+        for issue_type in ("errors", "warnings"):
+            issues = payload.get(issue_type)
+            if not isinstance(issues, list):
+                continue
+            excerpt[issue_type] = [
+                {
+                    key: issue[key]
+                    for key in ("code", "state", "states")
+                    if key in issue
+                }
+                for issue in issues
+                if isinstance(issue, dict)
+            ]
+        return excerpt
+
+    @classmethod
+    def _sanitize_value(
+        cls,
+        value,
+        *,
+        workspace: Path,
+        redactions=(),
+    ):
+        if isinstance(value, dict):
+            return {
+                str(key): cls._sanitize_value(
+                    item,
+                    workspace=workspace,
+                    redactions=redactions,
+                )
+                for key, item in value.items()
+                if str(key).lower() not in SENSITIVE_KEYS
+            }
+        if isinstance(value, list):
+            return [
+                cls._sanitize_value(
+                    item,
+                    workspace=workspace,
+                    redactions=redactions,
+                )
+                for item in value
+            ]
+        if isinstance(value, tuple):
+            return [
+                cls._sanitize_value(
+                    item,
+                    workspace=workspace,
+                    redactions=redactions,
+                )
+                for item in value
+            ]
+        if isinstance(value, str):
+            return cls._sanitize_text(
+                value,
+                workspace=workspace,
+                redactions=redactions,
+            )
+        return value
+
+    @staticmethod
+    def _sanitize_text(
+        value: str,
+        *,
+        workspace: Path,
+        redactions=(),
+    ):
+        text = str(value)
+        for private_value in sorted(
+            {str(item) for item in redactions if item},
+            key=len,
+            reverse=True,
+        ):
+            text = text.replace(private_value, "<redacted>")
+        workspace_text = str(workspace)
+        for variant in {
+            workspace_text,
+            workspace_text.replace("\\", "/"),
+            workspace_text.replace("/", "\\"),
+        }:
+            if variant:
+                text = text.replace(variant, "<run-workspace>")
+        text = re.sub(
+            r"(?i)\b(?:sk|key)-[a-z0-9_-]{8,}\b",
+            "<redacted-api-key>",
+            text,
+        )
+        text = re.sub(
+            r"(?i)\bBearer\s+[a-z0-9._-]{8,}",
+            "Bearer <redacted>",
+            text,
+        )
+
+        def sanitize_url(match):
+            try:
+                parsed = urlsplit(match.group(0))
+                hostname = parsed.hostname or ""
+                parsed_port = parsed.port
+            except ValueError:
+                return "<redacted-url>"
+            port = f":{parsed_port}" if parsed_port else ""
+            return urlunsplit((
+                parsed.scheme,
+                hostname + port,
+                "",
+                "",
+                "",
+            ))
+
+        text = re.sub(
+            r"https?://[^\s\"'<>]+",
+            sanitize_url,
+            text,
+        )
+        text = re.sub(
+            r"(?i)\b[A-Z]:\\(?:[^\\\r\n]+\\)+[^\\\r\n]*",
+            "<local-path>",
+            text,
+        )
+        text = re.sub(
+            r"\\\\[^\\\s]+\\[^\\\s]+(?:\\[^\\\r\n]+)*",
+            "<network-path>",
+            text,
+        )
+        text = re.sub(
+            r"(?<![\w])/(?:[^/\s]+/)+[^/\s]+",
+            "<local-path>",
+            text,
+        )
+        return text
+
+    @staticmethod
+    def _safe_json_artifact(value, *, workspace: Path):
+        if not value:
+            return None
+        path = Path(str(value))
+        if not path.is_absolute():
+            path = workspace / path
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(workspace)
+        except (OSError, ValueError):
+            return None
+        if (
+            resolved.suffix.lower() != ".json"
+            or not resolved.is_file()
+            or resolved.stat().st_size > 5 * 1024 * 1024
+        ):
+            return None
+        return resolved
 
     @staticmethod
     def format_duration(milliseconds):

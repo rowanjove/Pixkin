@@ -5,7 +5,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QIcon, QMovie, QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QInputDialog,
     QProgressBar, QPushButton, QSpinBox, QTextEdit, QVBoxLayout,
@@ -324,8 +324,22 @@ class PetLabWindow(QDialog):
         self.diagnostic_btn.clicked.connect(
             self._show_generation_diagnostics
         )
+        self.copy_diagnostic_btn = QPushButton("复制摘要")
+        self.copy_diagnostic_btn.setObjectName("secondary")
+        self.copy_diagnostic_btn.setEnabled(False)
+        self.copy_diagnostic_btn.clicked.connect(
+            self._copy_generation_summary
+        )
+        self.export_diagnostic_btn = QPushButton("导出问题包")
+        self.export_diagnostic_btn.setObjectName("secondary")
+        self.export_diagnostic_btn.setEnabled(False)
+        self.export_diagnostic_btn.clicked.connect(
+            self._export_generation_issue_bundle
+        )
         health_row.addWidget(self.run_health, 1)
         health_row.addWidget(self.diagnostic_btn)
+        health_row.addWidget(self.copy_diagnostic_btn)
+        health_row.addWidget(self.export_diagnostic_btn)
         layout.addLayout(health_row)
 
         retry_row = QHBoxLayout()
@@ -1108,6 +1122,8 @@ class PetLabWindow(QDialog):
             self.retry_btn.setEnabled(False)
             self.candidate_btn.setEnabled(False)
             self.diagnostic_btn.setEnabled(False)
+            self.copy_diagnostic_btn.setEnabled(False)
+            self.export_diagnostic_btn.setEnabled(False)
             self.run_health.setText(
                 "选择未完成任务后显示批次健康状态。"
             )
@@ -1118,10 +1134,14 @@ class PetLabWindow(QDialog):
             self.retry_btn.setEnabled(False)
             self.candidate_btn.setEnabled(False)
             self.diagnostic_btn.setEnabled(False)
+            self.copy_diagnostic_btn.setEnabled(False)
+            self.export_diagnostic_btn.setEnabled(False)
             self.run_health.setText("任务记录无法读取。")
             return
         self._update_run_health(record)
         self.diagnostic_btn.setEnabled(True)
+        self.copy_diagnostic_btn.setEnabled(True)
+        self.export_diagnostic_btn.setEnabled(True)
         for task_id, task in record["tasks"].items():
             candidate_count = len(task.get("candidates", []))
             if (
@@ -1206,6 +1226,57 @@ class PetLabWindow(QDialog):
             self,
             "生成批次诊断",
             "\n".join(messages),
+        )
+
+    def _copy_generation_summary(self):
+        run_id = self.run_input.currentData()
+        if not run_id:
+            return
+        try:
+            report = PetGenerationDiagnostics.summarize(
+                self.run_store.load(run_id)
+            )
+        except PetGenerationRunError as exc:
+            self._on_error(str(exc))
+            return
+        QApplication.clipboard().setText(
+            PetGenerationDiagnostics.technical_summary(report)
+        )
+        self.status.setText(
+            "脱敏技术摘要已复制；其中不含 API Key、角色描述或本地路径。"
+        )
+
+    def _export_generation_issue_bundle(self):
+        run_id = self.run_input.currentData()
+        if not run_id:
+            return
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出匿名问题包",
+            "Pixkin-Issue.zip",
+            "ZIP 压缩包 (*.zip)",
+        )
+        if not destination:
+            return
+        path = Path(destination)
+        if path.suffix.lower() != ".zip":
+            path = path.with_suffix(".zip")
+        try:
+            record = self.run_store.load(run_id)
+            result = PetGenerationDiagnostics.build_issue_bundle(
+                record,
+                workspace=self.run_store.workspace(run_id),
+                destination=path,
+            )
+        except (OSError, PetGenerationRunError, ValueError) as exc:
+            self._on_error(f"匿名问题包导出失败：{exc}")
+            return
+        self.status.setText(f"匿名问题包已导出：{result['path']}")
+        QMessageBox.information(
+            self,
+            "匿名问题包已导出",
+            "问题包只包含脱敏诊断与 QA JSON；"
+            "不包含参考图、生成图片、API Key、角色名字或自由文本设定。",
         )
 
     def _on_task_tool_changed(self, _index=None):
