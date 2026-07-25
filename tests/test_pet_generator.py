@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yaml
 from PIL import Image, ImageChops, ImageDraw, ImageOps
@@ -27,6 +27,12 @@ from core.pet_generator import (
     STANDARD_POSE_IDS,
     PetGenerationWorker,
 )
+
+
+class FakeStatusError(RuntimeError):
+    def __init__(self, status_code, message="temporary failure"):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class PetGeneratorTests(unittest.TestCase):
@@ -462,6 +468,146 @@ class PetGeneratorTests(unittest.TestCase):
             self.assertEqual(stopped["tasks"]["idle"]["attempts"], 0)
             self.assertEqual(stopped["stage"], "failed")
             self.assertIn("预算已用尽", errors[0])
+
+    def test_transient_error_retries_with_budgeted_backoff_and_timing(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="",
+                model="gpt-image-2",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[reference],
+                generation_mode="basic",
+                max_api_calls=8,
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker,
+                    "_generate",
+                    side_effect=[
+                        FakeStatusError(429, "slow down"),
+                        self._generated_sprite_bytes(1),
+                    ],
+                ) as generate,
+                patch("core.pet_generator.time.sleep") as sleep,
+            ):
+                worker.run()
+
+            record = store.list_runs()[0]
+            task = record["tasks"]["canonical"]
+            calls = record["metrics"]["api_calls"]
+            self.assertEqual(generate.call_count, 2)
+            sleep.assert_called_once_with(1.0)
+            self.assertEqual(task["attempts"], 2)
+            self.assertEqual(task["selected_candidate"], "attempt-002")
+            self.assertEqual(
+                [call["outcome"] for call in calls],
+                ["failed", "success"],
+            )
+            self.assertEqual(
+                calls[0]["error_category"],
+                "rate_limit",
+            )
+            summary = PetGenerationWorker.api_timing_summary(record)
+            self.assertEqual(summary["count"], 2)
+            self.assertEqual(summary["successful"], 1)
+            self.assertEqual(summary["failed"], 1)
+
+    def test_error_classifier_retries_only_transient_failures(self):
+        cases = {
+            400: ("invalid_request", False),
+            401: ("authentication", False),
+            403: ("permission", False),
+            404: ("not_found", False),
+            429: ("rate_limit", True),
+            500: ("server", True),
+            504: ("timeout", True),
+        }
+        for status, expected in cases.items():
+            with self.subTest(status=status):
+                result = PetGenerationWorker.classify_generation_error(
+                    FakeStatusError(status)
+                )
+                self.assertEqual(
+                    (result["category"], result["retriable"]),
+                    expected,
+                )
+        invalid_response = (
+            PetGenerationWorker.classify_generation_error(
+                RuntimeError("图像服务没有返回可用图片。")
+            )
+        )
+        self.assertEqual(
+            (
+                invalid_response["category"],
+                invalid_response["retriable"],
+            ),
+            ("invalid_response", True),
+        )
+
+    def test_compatible_preflight_is_cached_when_models_are_unavailable(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            run = store.create(
+                run_id="preflight-run",
+                request={
+                    "mode": "basic",
+                    "max_api_calls": 8,
+                    "image_base_url":
+                        "https://images.example.test/v1",
+                    "image_model": "custom-image",
+                    "image_quality": "low",
+                    "reference_paths": [str(reference)],
+                },
+                task_ids=["canonical"],
+            )
+            worker = PetGenerationWorker(
+                api_key="test",
+                base_url="https://images.example.test/v1",
+                model="custom-image",
+                quality="low",
+                pet_name="Nova",
+                personality="",
+                style_notes="",
+                reference_paths=[reference],
+                generation_mode="basic",
+                max_api_calls=8,
+                run_id=run["id"],
+                run_store=store,
+            )
+            first_client = MagicMock()
+            first_client.images.edit = MagicMock()
+            first_client.models.retrieve.side_effect = FakeStatusError(
+                404, "models endpoint unavailable"
+            )
+
+            worker._preflight_generation_client(first_client)
+
+            cached = store.load(run["id"])["request"][
+                "capability_preflight"
+            ]
+            self.assertEqual(cached["status"], "unverified")
+            second = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+            )
+            second_client = MagicMock()
+            second_client.images.edit = MagicMock()
+
+            second._preflight_generation_client(second_client)
+
+            second_client.models.retrieve.assert_not_called()
 
     def test_declared_symmetry_mirrors_without_spending_api_calls(self):
         root = Path(__file__).resolve().parents[1]

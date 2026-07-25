@@ -83,6 +83,7 @@ class PetGenerationRunStore:
             "tasks": tasks,
             "artifacts": {},
             "reviews": {},
+            "metrics": {"api_calls": []},
             "error": None,
         }
         self._write(record)
@@ -108,6 +109,8 @@ class PetGenerationRunStore:
         # Early v1 manifests did not contain review decisions. Keep them
         # resumable instead of forcing users to discard generated artwork.
         record.setdefault("reviews", {})
+        record.setdefault("metrics", {"api_calls": []})
+        record["metrics"].setdefault("api_calls", [])
         for task in record.get("tasks", {}).values():
             if isinstance(task, dict):
                 task.setdefault("candidates", [])
@@ -182,6 +185,35 @@ class PetGenerationRunStore:
             "updated_at": now,
         }
         record["updated_at"] = now
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def record_api_call(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        duration_ms: int,
+        outcome: str,
+        error_category: Optional[str] = None,
+        retry_number: int = 0,
+    ) -> Dict[str, Any]:
+        if outcome not in {"success", "failed"}:
+            raise PetGenerationRunError("API 调用结果必须是 success 或 failed。")
+        record = self.load(run_id)
+        if task_id not in record["tasks"]:
+            raise PetGenerationRunError(f"找不到动作任务：{task_id}")
+        record["metrics"]["api_calls"].append({
+            "task_id": str(task_id),
+            "recorded_at": _utc_now(),
+            "duration_ms": max(0, int(duration_ms)),
+            "outcome": outcome,
+            "error_category": (
+                str(error_category) if error_category else None
+            ),
+            "retry_number": max(0, int(retry_number)),
+        })
+        record["updated_at"] = _utc_now()
         self._write(record)
         return copy.deepcopy(record)
 
@@ -424,6 +456,17 @@ class PetGenerationRunStore:
             raise PetGenerationRunError("孵化产物列表无效。")
         if not isinstance(record.get("reviews"), dict):
             raise PetGenerationRunError("孵化审核记录无效。")
+        metrics = record.get("metrics")
+        if (
+            not isinstance(metrics, dict)
+            or not isinstance(metrics.get("api_calls"), list)
+        ):
+            raise PetGenerationRunError("孵化调用统计无效。")
+        for call in metrics["api_calls"]:
+            if not isinstance(call, dict):
+                raise PetGenerationRunError("孵化调用记录无效。")
+            if call.get("outcome") not in {"success", "failed"}:
+                raise PetGenerationRunError("孵化调用结果无效。")
         for task in record["tasks"].values():
             if not isinstance(task, dict):
                 raise PetGenerationRunError("孵化任务详情无效。")

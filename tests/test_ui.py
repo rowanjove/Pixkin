@@ -224,6 +224,13 @@ class UiSmokeTests(unittest.TestCase):
                 "failed",
                 increment_attempt=True,
             )
+            store.record_api_call(
+                run["id"],
+                "canonical",
+                duration_ms=1500,
+                outcome="failed",
+                error_category="timeout",
+            )
 
             lab = PetLabWindow(
                 self.config,
@@ -232,6 +239,7 @@ class UiSmokeTests(unittest.TestCase):
             )
 
             self.assertIn("API 1/8", lab.run_input.currentText())
+            self.assertIn("1.5s", lab.run_input.currentText())
             lab.close()
 
     def test_chat_escapes_user_html(self):
