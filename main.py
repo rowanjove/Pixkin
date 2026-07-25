@@ -116,6 +116,9 @@ class DesktopPetApp:
 
         self.tool_registry = ToolRegistry()
         self.pet_window = PetWindow(self.config_mgr, active_package)
+        self.pet_window.chat_window.set_tool_schemas(
+            self.tool_registry.get_tools_schema()
+        )
         self.chat_history_list = []
         self.ai_worker = None
         self.live_monitor = None
@@ -388,10 +391,9 @@ class DesktopPetApp:
             duration_ms=3200,
         )
         platform_name = "B站" if platform == "bilibili" else "抖音"
-        message = (
-            f"你关注的主播【{anchor_name}】在{platform_name}开播啦！\n{title}"
+        self.pet_window.chat_window.show_live_alert(
+            platform_name, anchor_name, title
         )
-        self.pet_window.chat_window.show_alert_bubble("开播啦！", message)
         self.pet_window._update_chat_position()
         self.tray.showMessage(
             f"{anchor_name} 开播啦",
@@ -568,6 +570,10 @@ class DesktopPetApp:
             return
         package = self.package_manager.get_active()
         self.pet_window.set_character(package)
+        self.pet_window.chat_window.set_user_profile(
+            self.config_mgr.get("user", "display_name", "我"),
+            self.config_mgr.get("user", "avatar_path", ""),
+        )
         self.pet_window.apply_config()
         self._apply_tray_theme()
         self._restart_live_monitor()

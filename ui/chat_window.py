@@ -7,8 +7,8 @@ from PyQt6.QtGui import (
     QPixmap,
 )
 from PyQt6.QtWidgets import (
-    QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
+    QApplication, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
+    QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
     QVBoxLayout, QWidget,
 )
 
@@ -83,6 +83,28 @@ def _avatar_pixmap(path, size: int) -> QPixmap:
     return result
 
 
+def _user_avatar_pixmap(path, size: int) -> QPixmap:
+    source = QPixmap(str(path)) if path else QPixmap()
+    if source.isNull():
+        return QPixmap()
+    scaled = source.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    x = max(0, (scaled.width() - size) // 2)
+    y = max(0, (scaled.height() - size) // 2)
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setClipPath(_circle_path(size))
+    painter.drawPixmap(0, 0, scaled.copy(x, y, size, size))
+    painter.end()
+    return result
+
+
 def _circle_path(diameter: int, offset: int = 0):
     path = QPainterPath()
     path.addEllipse(offset, offset, diameter, diameter)
@@ -96,9 +118,13 @@ class MessageRow(QWidget):
         content: str,
         avatar_path=None,
         author_name="山山",
+        user_avatar_path=None,
+        user_name="我",
+        metadata=None,
         parent=None,
     ):
         super().__init__(parent)
+        metadata = metadata or {}
         self.text_label = None
         self.author_label = None
         self.setSizePolicy(
@@ -128,12 +154,22 @@ class MessageRow(QWidget):
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
             )
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(14, 12, 14, 12)
-            card_layout.setSpacing(4)
-            eyebrow = QLabel("开播提醒")
-            eyebrow.setObjectName("alertEyebrow")
-            text = QLabel(content)
-            text.setObjectName("alertText")
+            card_layout.setContentsMargins(15, 13, 15, 13)
+            card_layout.setSpacing(7)
+            badge_row = QHBoxLayout()
+            badge_row.setSpacing(7)
+            live_badge = QLabel("● LIVE")
+            live_badge.setObjectName("liveBadge")
+            platform_badge = QLabel(metadata.get("platform") or "直播提醒")
+            platform_badge.setObjectName("platformBadge")
+            badge_row.addWidget(live_badge)
+            badge_row.addWidget(platform_badge)
+            badge_row.addStretch()
+            headline = QLabel(metadata.get("headline") or "关注的主播开播了")
+            headline.setObjectName("alertAnchor")
+            headline.setTextFormat(Qt.TextFormat.PlainText)
+            text = QLabel(metadata.get("body") or content)
+            text.setObjectName("alertTitle")
             text.setTextFormat(Qt.TextFormat.PlainText)
             text.setWordWrap(True)
             text.setMinimumHeight(
@@ -142,13 +178,17 @@ class MessageRow(QWidget):
                     QFontMetrics(text.font()).boundingRect(
                         0, 0, 300, 1000,
                         int(Qt.TextFlag.TextWordWrap),
-                        content,
+                        text.text(),
                     ).height(),
                 )
             )
+            meta = QLabel(metadata.get("meta") or "刚刚检测到开播")
+            meta.setObjectName("alertMeta")
             self.text_label = text
-            card_layout.addWidget(eyebrow)
+            card_layout.addLayout(badge_row)
+            card_layout.addWidget(headline)
             card_layout.addWidget(text)
+            card_layout.addWidget(meta)
             row.addWidget(card)
             return
 
@@ -156,8 +196,14 @@ class MessageRow(QWidget):
         avatar.setFixedSize(34, 34)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if role == "user":
-            avatar.setText("我")
             avatar.setObjectName("userAvatar")
+            user_source = (
+                QPixmap(str(user_avatar_path)) if user_avatar_path else QPixmap()
+            )
+            if user_source.isNull():
+                avatar.setText((user_name or "我")[:2])
+            else:
+                avatar.setPixmap(_user_avatar_pixmap(user_avatar_path, 34))
         else:
             avatar.setPixmap(_avatar_pixmap(avatar_path, 34))
 
@@ -170,11 +216,14 @@ class MessageRow(QWidget):
         bubble_layout = QVBoxLayout(bubble)
         bubble_layout.setContentsMargins(13, 10, 13, 10)
         bubble_layout.setSpacing(4)
-        if role != "user":
-            author = QLabel(author_name)
-            author.setObjectName("messageAuthor")
-            self.author_label = author
-            bubble_layout.addWidget(author)
+        author = QLabel(user_name if role == "user" else author_name)
+        author.setObjectName(
+            "userMessageAuthor" if role == "user" else "messageAuthor"
+        )
+        if role == "user":
+            author.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.author_label = author
+        bubble_layout.addWidget(author)
         text = QLabel(content or "•••")
         text.setObjectName("messageText")
         text.setTextFormat(Qt.TextFormat.PlainText)
@@ -231,6 +280,18 @@ class ChatBubbleWindow(QWidget):
         self._window_origin = QPoint()
         self._character_name = "山山"
         self._avatar_path = resource_path("assets/pixkin/pip-avatar.png")
+        self._user_name = (
+            str(config_manager.get("user", "display_name", "我")).strip()
+            if config_manager is not None
+            else "我"
+        ) or "我"
+        self._user_avatar_path = (
+            config_manager.get("user", "avatar_path", "")
+            if config_manager is not None
+            else ""
+        )
+        self._available_tool_names = set()
+        self._focus_after_response = False
         self._init_ui()
         self._stream_update_timer = QTimer(self)
         self._stream_update_timer.setSingleShot(True)
@@ -283,6 +344,9 @@ class ChatBubbleWindow(QWidget):
                 color: #7BE0D0; font-size: 9px; font-weight: 900;
                 letter-spacing: 1px;
             }
+            QLabel#userMessageAuthor {
+                color: #D9D3FF; font-size: 9px; font-weight: 800;
+            }
             QLabel#messageText { color: #F6F4FF; font-size: 13px; }
             QLabel#userAvatar {
                 color: #121827; background: #7BE0D0; border-radius: 17px;
@@ -297,14 +361,22 @@ class ChatBubbleWindow(QWidget):
                 border-radius: 12px; padding: 7px 11px; font-size: 10px;
             }
             QFrame#alertCard {
-                background: #2D271E; border: 1px solid #6B5132;
-                border-radius: 16px;
+                background: #251E27; border: 1px solid #70435C;
+                border-radius: 18px;
             }
-            QLabel#alertEyebrow {
-                color: #FF9D69; font-size: 9px; font-weight: 900;
-                letter-spacing: 2px;
+            QLabel#liveBadge {
+                color: #FFF7F5; background: #F05268; border-radius: 7px;
+                padding: 3px 7px; font-size: 8px; font-weight: 900;
             }
-            QLabel#alertText { color: #FFE8D6; font-size: 12px; }
+            QLabel#platformBadge {
+                color: #FFB9C6; background: #3A2733; border-radius: 7px;
+                padding: 3px 7px; font-size: 9px; font-weight: 750;
+            }
+            QLabel#alertAnchor {
+                color: #FFF6F8; font-size: 13px; font-weight: 850;
+            }
+            QLabel#alertTitle { color: #E7CED8; font-size: 11px; }
+            QLabel#alertMeta { color: #9E7988; font-size: 9px; }
             QFrame#composer {
                 background: #202A3D; border: 1px solid #35415A;
                 border-radius: 20px;
@@ -346,6 +418,7 @@ class ChatBubbleWindow(QWidget):
             }
             QMenu::item { padding: 8px 18px; border-radius: 6px; }
             QMenu::item:selected { background: #263149; color: #7BE0D0; }
+            QMenu::item:disabled { color: #657086; }
         """
 
         root = QVBoxLayout(self)
@@ -473,6 +546,7 @@ class ChatBubbleWindow(QWidget):
                 background: #FFFFFF; border-color: #D9E1EC;
             }
             QLabel#messageAuthor { color: #16897D; }
+            QLabel#userMessageAuthor { color: #E8E4FF; }
             QLabel#messageText { color: #172033; }
             QFrame#userBubble { background: #6654E8; border-color: #7868EC; }
             QFrame#userBubble QLabel#messageText { color: white; }
@@ -484,10 +558,13 @@ class ChatBubbleWindow(QWidget):
                 color: #A43B29; background: #FFF0EC; border-color: #F2C9BF;
             }
             QFrame#alertCard {
-                background: #FFF7E8; border-color: #E7C78B;
+                background: #FFF4F6; border-color: #E8BCC7;
             }
-            QLabel#alertEyebrow { color: #B75A24; }
-            QLabel#alertText { color: #67401D; }
+            QLabel#liveBadge { color: white; background: #E84E64; }
+            QLabel#platformBadge { color: #A43D54; background: #F9E2E8; }
+            QLabel#alertAnchor { color: #522332; }
+            QLabel#alertTitle { color: #754556; }
+            QLabel#alertMeta { color: #A0707F; }
             QFrame#composer {
                 background: #FFFFFF; border-color: #CBD5E1;
             }
@@ -532,13 +609,45 @@ class ChatBubbleWindow(QWidget):
         )
         self._render_messages()
 
-    def append_message(self, role: str, content: str):
+    def set_user_profile(self, name: str, avatar_path=None):
+        self._user_name = str(name or "").strip()[:20] or "我"
+        candidate = Path(avatar_path) if avatar_path else None
+        self._user_avatar_path = (
+            str(candidate)
+            if (
+                candidate
+                and candidate.is_file()
+                and not QPixmap(str(candidate)).isNull()
+            )
+            else ""
+        )
+        self._render_messages()
+
+    def set_tool_schemas(self, schemas):
+        self._available_tool_names = {
+            function.get("name")
+            for schema in schemas or []
+            if isinstance(schema, dict)
+            and isinstance((function := schema.get("function")), dict)
+            and function.get("name")
+        }
+        self.tool_btn.setToolTip(
+            f"快捷工具 · {len(self._available_tool_names)} 项能力"
+            if self._available_tool_names
+            else "快捷工具"
+        )
+
+    def append_message(self, role: str, content: str, metadata=None):
         self._stream_update_timer.stop()
         if self._stream_index is not None:
             stream_item = self._messages[self._stream_index]
             if not stream_item["content"] and role != "assistant":
                 self._messages.pop(self._stream_index)
-        self._messages.append({"role": role, "content": content})
+        self._messages.append({
+            "role": role,
+            "content": content,
+            "metadata": metadata or {},
+        })
         self._stream_index = None
         self._render_messages()
 
@@ -572,17 +681,57 @@ class ChatBubbleWindow(QWidget):
             self._render_messages()
 
     def set_busy(self, busy: bool):
+        if busy:
+            self._focus_after_response = (
+                self.isActiveWindow() or self.input_field.hasFocus()
+            )
         self.input_field.setDisabled(busy)
         self.send_btn.setDisabled(busy)
         self.tool_btn.setDisabled(busy)
         state = "思考中…" if busy else "待命"
         self.status_label.setText(state)
+        if not busy and self._focus_after_response:
+            QTimer.singleShot(0, self._restore_input_focus)
 
     def show_alert_bubble(self, title: str, text: str):
         clean = text.replace("<br/>", "\n").replace("<b>", "").replace("</b>", "")
-        self.append_message("alert", f"{title}\n{clean}")
+        self.append_message(
+            "alert",
+            f"{title}\n{clean}",
+            {
+                "headline": title,
+                "body": clean,
+                "meta": "刚刚收到提醒",
+            },
+        )
         self.show()
         self.raise_()
+
+    def show_live_alert(
+        self, platform_name: str, anchor_name: str, title: str
+    ):
+        live_title = str(title or "").strip() or "主播正在直播"
+        self.append_message(
+            "alert",
+            f"{anchor_name} 开播了\n{live_title}",
+            {
+                "platform": platform_name,
+                "headline": f"{anchor_name} 开播了",
+                "body": live_title,
+                "meta": "刚刚检测到开播 · 点击桌宠继续对话",
+            },
+        )
+        self.show()
+        self.raise_()
+
+    def _restore_input_focus(self):
+        self._focus_after_response = False
+        if not self.isVisible() or not self.input_field.isEnabled():
+            return
+        active = QApplication.activeWindow()
+        if active not in (None, self):
+            return
+        self.input_field.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _clear_message_widgets(self):
         self._message_rows = []
@@ -640,6 +789,9 @@ class ChatBubbleWindow(QWidget):
                     item["content"] or "•••",
                     self._avatar_path,
                     self._character_name,
+                    self._user_avatar_path,
+                    self._user_name,
+                    item.get("metadata"),
                 )
                 self._message_rows.append(message)
                 self.messages_layout.addWidget(message)
@@ -685,25 +837,97 @@ class ChatBubbleWindow(QWidget):
         if not self._scroll_timer.isActive():
             self._scroll_timer.start()
 
-    def _show_tool_menu(self):
+    def _build_tool_menu(self):
         menu = QMenu(self)
-        actions = (
-            ("查看可用工具", "介绍一下你能调用的工具"),
-            ("打开计算器", "请调用工具打开计算器"),
-            ("打开记事本", "请调用工具打开记事本"),
-            ("查看系统信息", "请调用工具查看系统信息"),
-            ("孵化新伙伴", None),
+        heading = QAction(
+            f"AI 工具 · {len(self._available_tool_names)} 项已连接",
+            menu,
         )
-        for label, prompt in actions:
+        heading.setEnabled(False)
+        menu.addAction(heading)
+        menu.addSeparator()
+
+        shortcuts = (
+            (
+                "list_available_tools", "查看全部工具",
+                "请调用 list_available_tools 工具，介绍目前可用的能力。", False,
+            ),
+            (
+                "get_current_time", "查询当前时间",
+                "请调用 get_current_time 工具告诉我当前时间。", False,
+            ),
+            (
+                "get_system_info", "查看系统信息",
+                "请调用 get_system_info 工具查看这台电脑的系统信息。", False,
+            ),
+            (
+                "get_disk_usage", "查看磁盘空间",
+                "请调用 get_disk_usage 工具查看磁盘空间。", False,
+            ),
+            (
+                "calculate_expression", "计算算式…",
+                "请使用 calculate_expression 工具计算：", True,
+            ),
+            (
+                "open_url", "打开网页…",
+                "请使用 open_url 工具打开这个网页：https://", True,
+            ),
+            (
+                "open_application", "打开计算器",
+                "请调用 open_application 工具打开计算器。", False,
+            ),
+            (
+                "open_application", "打开记事本",
+                "请调用 open_application 工具打开记事本。", False,
+            ),
+            (
+                "open_application", "打开画图",
+                "请调用 open_application 工具打开画图。", False,
+            ),
+            (
+                "open_application", "打开文件管理器",
+                "请调用 open_application 工具打开文件资源管理器。", False,
+            ),
+        )
+        added = False
+        for tool_name, label, prompt, prefill in shortcuts:
+            if tool_name not in self._available_tool_names:
+                continue
             action = QAction(label, menu)
-            if prompt is None:
-                action.triggered.connect(self.pet_lab_requested)
-            else:
-                action.triggered.connect(
-                    lambda _checked=False, value=prompt: self._send_prompt(value)
-                )
+            action.setData(("prefill" if prefill else "send", prompt))
+            action.triggered.connect(self._on_tool_action_triggered)
             menu.addAction(action)
+            added = True
+        if not added:
+            unavailable = QAction("AI 工具尚未连接", menu)
+            unavailable.setEnabled(False)
+            menu.addAction(unavailable)
+        menu.addSeparator()
+        studio = QAction("孵化新伙伴", menu)
+        studio.triggered.connect(self.pet_lab_requested)
+        menu.addAction(studio)
+        return menu
+
+    def _show_tool_menu(self):
+        menu = self._build_tool_menu()
         menu.exec(self.tool_btn.mapToGlobal(self.tool_btn.rect().bottomLeft()))
+
+    def _on_tool_action_triggered(self):
+        action = self.sender()
+        if not isinstance(action, QAction):
+            return
+        mode, prompt = action.data() or (None, None)
+        if mode == "prefill":
+            self._prefill_prompt(prompt)
+        elif mode == "send":
+            self._send_prompt(prompt)
+
+    def _prefill_prompt(self, value: str):
+        if not self.input_field.isEnabled():
+            return
+        self.input_field.setText(value)
+        self.input_field.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.input_field.setCursorPosition(len(value))
 
     def _send_prompt(self, value: str):
         if not self.input_field.isEnabled():
