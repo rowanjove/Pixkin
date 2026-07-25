@@ -338,6 +338,44 @@ class PetGenerationDiagnosticsTests(unittest.TestCase):
             ):
                 PetGenerationDiagnostics.inspect_issue_bundle(source)
 
+    def test_issue_bundle_inspection_rejects_malformed_manifest_lists(self):
+        record = {
+            "id": "malformed-manifest",
+            "status": "pending",
+            "stage": "created",
+            "request": {},
+            "tasks": {"canonical": self._task("pending")},
+            "metrics": {"api_calls": []},
+            "artifacts": {},
+            "error": None,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source.zip"
+            malformed = base / "malformed.zip"
+            PetGenerationDiagnostics.build_issue_bundle(
+                record,
+                workspace=base,
+                destination=source,
+            )
+            with zipfile.ZipFile(source) as archive:
+                documents = {
+                    name: archive.read(name)
+                    for name in archive.namelist()
+                }
+            manifest = json.loads(documents["manifest.json"])
+            manifest["contents"] = 7
+            documents["manifest.json"] = json.dumps(manifest).encode()
+            with zipfile.ZipFile(malformed, "w") as archive:
+                for name, payload in documents.items():
+                    archive.writestr(name, payload)
+
+            with self.assertRaisesRegex(
+                IssueBundleError,
+                "清单与实际文件不一致",
+            ):
+                PetGenerationDiagnostics.inspect_issue_bundle(malformed)
+
     def test_technical_summary_contains_no_run_identifier(self):
         report = PetGenerationDiagnostics.summarize({
             "id": "private-character-name",

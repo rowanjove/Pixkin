@@ -26,7 +26,14 @@ RUN_STATUSES = {
     "canceled",
 }
 TASK_STATUSES = {"pending", "running", "complete", "failed", "canceled"}
+TASK_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 CANDIDATE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+WINDOWS_FORBIDDEN_CHARS = frozenset('<>:"|?*')
 
 
 def _utc_now() -> str:
@@ -55,8 +62,8 @@ class PetGenerationRunStore:
         now = _utc_now()
         tasks = {}
         for task_id in task_ids:
-            task_id = str(task_id).strip()
-            if not task_id or task_id in tasks:
+            task_id = self._validated_task_id(task_id)
+            if task_id in tasks:
                 raise PetGenerationRunError("孵化任务 ID 不能为空或重复。")
             tasks[task_id] = {
                 "status": "pending",
@@ -378,7 +385,11 @@ class PetGenerationRunStore:
             raise PetGenerationRunError(f"找不到动作任务：{task_id}")
         task = record["tasks"][task_id]
         task["status"] = status
-        task["artifact"] = str(artifact) if artifact else None
+        task["artifact"] = (
+            self._validated_artifact_path(artifact).as_posix()
+            if artifact
+            else None
+        )
         task["error"] = str(error) if error else None
         if increment_attempt:
             task["attempts"] = int(task.get("attempts", 0)) + 1
@@ -427,14 +438,35 @@ class PetGenerationRunStore:
         return value
 
     @staticmethod
+    def _validated_task_id(task_id: str) -> str:
+        value = str(task_id).strip()
+        if not TASK_ID_PATTERN.fullmatch(value):
+            raise PetGenerationRunError(f"孵化任务 ID 不安全：{value}")
+        return value
+
+    @staticmethod
     def _validated_artifact_path(artifact: str) -> PurePosixPath:
         value = str(artifact).replace("\\", "/")
         path = PurePosixPath(value)
+        unsafe_windows_part = any(
+            (
+                part.split(".", 1)[0].upper()
+                in WINDOWS_RESERVED_NAMES
+            )
+            or part.endswith((" ", "."))
+            or any(
+                character in WINDOWS_FORBIDDEN_CHARS
+                or ord(character) < 32
+                for character in part
+            )
+            for part in path.parts
+        )
         if (
             not value
             or path.is_absolute()
             or ".." in path.parts
             or "." in path.parts
+            or unsafe_windows_part
         ):
             raise PetGenerationRunError(
                 f"候选产物路径不安全：{artifact}"
@@ -468,9 +500,24 @@ class PetGenerationRunStore:
                 raise PetGenerationRunError("孵化调用记录无效。")
             if call.get("outcome") not in {"success", "failed"}:
                 raise PetGenerationRunError("孵化调用结果无效。")
-        for task in record["tasks"].values():
+        for task_id, task in record["tasks"].items():
+            PetGenerationRunStore._validated_task_id(task_id)
             if not isinstance(task, dict):
                 raise PetGenerationRunError("孵化任务详情无效。")
+            if task.get("status") not in TASK_STATUSES:
+                raise PetGenerationRunError("孵化任务详情状态无效。")
+            attempts = task.get("attempts")
+            if (
+                isinstance(attempts, bool)
+                or not isinstance(attempts, int)
+                or attempts < 0
+            ):
+                raise PetGenerationRunError("孵化任务尝试次数无效。")
+            artifact = task.get("artifact")
+            if artifact is not None:
+                PetGenerationRunStore._validated_artifact_path(
+                    artifact
+                )
             if not isinstance(task.get("candidates"), list):
                 raise PetGenerationRunError("候选版本列表无效。")
             candidate_ids = set()

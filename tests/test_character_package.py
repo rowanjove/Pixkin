@@ -171,6 +171,83 @@ class CharacterPackageTests(unittest.TestCase):
             with self.assertRaises(CharacterPackageError):
                 manager.import_zip(str(zip_path))
 
+    def test_zip_rejects_windows_unsafe_and_case_colliding_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = ConfigManager(str(base / "config.json"))
+            manager = CharacterPackageManager(config, base / "characters")
+            unsafe_names = (
+                "images/file:stream.png",
+                "images/CON.png",
+                "images/trailing-dot.",
+                "images/trailing-space ",
+            )
+            for index, unsafe_name in enumerate(unsafe_names):
+                with self.subTest(name=unsafe_name):
+                    archive_path = base / f"unsafe-{index}.zip"
+                    with zipfile.ZipFile(archive_path, "w") as archive:
+                        archive.writestr(unsafe_name, b"unsafe")
+                    with self.assertRaisesRegex(
+                        CharacterPackageError,
+                        "路径不安全",
+                    ):
+                        manager.inspect_zip(str(archive_path))
+
+            collision = base / "collision.zip"
+            with zipfile.ZipFile(collision, "w") as archive:
+                archive.writestr("images/Pet.png", b"first")
+                archive.writestr("images/pet.png", b"second")
+            with self.assertRaisesRegex(
+                CharacterPackageError,
+                "大小写冲突",
+            ):
+                manager.inspect_zip(str(collision))
+
+    def test_zip_rejects_encrypted_member_and_recursive_yaml_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = ConfigManager(str(base / "config.json"))
+            manager = CharacterPackageManager(config, base / "characters")
+            encrypted = zipfile.ZipInfo("images/idle.png")
+            encrypted.flag_bits |= 0x1
+            with self.assertRaisesRegex(
+                CharacterPackageError,
+                "加密文件",
+            ):
+                manager._validate_zip_member(encrypted)
+
+            with self.assertRaisesRegex(
+                CharacterPackageError,
+                "循环 YAML 别名",
+            ):
+                manager._parse_frontmatter(
+                    "---\n"
+                    "id: alias-pack\n"
+                    "name: Alias\n"
+                    "persona: &loop\n"
+                    "  nested: *loop\n"
+                    "animations:\n"
+                    "  idle: images/idle.png\n"
+                    "---\n"
+                )
+
+    def test_invalid_active_package_id_cannot_escape_character_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = ConfigManager(str(base / "config.json"))
+            manager = CharacterPackageManager(config, base / "characters")
+            config.update_section(
+                "character",
+                {"active_pack": "../outside"},
+            )
+
+            self.assertIsNone(manager.get_active())
+            with self.assertRaisesRegex(
+                CharacterPackageError,
+                "id 只能使用",
+            ):
+                manager.activate("../outside")
+
     def test_rename_and_delete_character_falls_back_to_default(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

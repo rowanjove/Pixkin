@@ -459,6 +459,13 @@ class PetLabWindow(QDialog):
 
         previous_api_key = SecretStore.get_image_api_key()
         saved = SecretStore.set_image_api_key(api_key)
+        credential_available = bool(
+            saved
+            or (
+                previous_api_key
+                and previous_api_key == api_key
+            )
+        )
         if not saved and previous_api_key and previous_api_key != api_key:
             QMessageBox.critical(
                 self,
@@ -471,7 +478,7 @@ class PetLabWindow(QDialog):
             "base_url": self.api_url.text().strip(),
             "model": self.api_model.text().strip() or "gpt-image-2",
             "quality": self.quality.currentData(),
-            "api_key": "" if saved else api_key,
+            "api_key": "" if credential_available else api_key,
         })
         if not config_saved:
             rollback_ok = True
@@ -489,6 +496,12 @@ class PetLabWindow(QDialog):
                 + "请检查磁盘空间和目录权限。",
             )
             return
+        if not credential_available:
+            QMessageBox.warning(
+                self,
+                "凭据保存受限",
+                "Windows 凭据管理器不可用，图像 API Key 已回退保存到本地配置文件。",
+            )
         worker = PetGenerationWorker(
             api_key=api_key,
             base_url=self.api_url.text().strip(),
@@ -812,7 +825,7 @@ class PetLabWindow(QDialog):
             history = dialog.addButton(
                 "查看候选版本", QMessageBox.ButtonRole.ActionRole
             )
-        later = dialog.addButton(
+        dialog.addButton(
             "稍后处理", QMessageBox.ButtonRole.RejectRole
         )
         pixmap = QPixmap(sheet_path)
