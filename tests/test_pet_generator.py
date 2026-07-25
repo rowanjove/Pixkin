@@ -4,10 +4,18 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
 from PIL import Image
 
+from core.character_package import CharacterPackageManager
+from core.config import ConfigManager
 from core.pet_generation_run import PetGenerationRunStore
-from core.pet_generator import HARD_CARTOON_RULES, POSES, PetGenerationWorker
+from core.pet_generator import (
+    BASIC_POSE_IDS,
+    HARD_CARTOON_RULES,
+    POSES,
+    PetGenerationWorker,
+)
 
 
 class PetGeneratorTests(unittest.TestCase):
@@ -38,6 +46,7 @@ class PetGeneratorTests(unittest.TestCase):
             target = Path(directory) / "sprite.png"
             PetGenerationWorker._save_sprite(raw, target)
             result = Image.open(target).convert("RGBA")
+            self.assertEqual(result.size, (192, 208))
             self.assertEqual(result.getpixel((0, 0))[3], 0)
             self.assertIsNotNone(result.getchannel("A").getbbox())
 
@@ -60,6 +69,13 @@ class PetGeneratorTests(unittest.TestCase):
             with zipfile.ZipFile(package) as archive:
                 names = set(archive.namelist())
                 self.assertIn("character.md", names)
+                manifest = archive.read("character.md").decode("utf-8")
+                metadata = yaml.safe_load(manifest.split("---", 2)[1])
+                self.assertEqual(metadata["schema_version"], "2.0")
+                self.assertEqual(metadata["quality_tier"], "basic")
+                self.assertFalse(
+                    metadata["rights"]["author_confirmed_rights"]
+                )
                 for state in POSES:
                     self.assertIn(f"images/{state}.png", names)
 
@@ -101,8 +117,20 @@ class PetGeneratorTests(unittest.TestCase):
             self.assertEqual(
                 runs[0]["tasks"]["canonical"]["status"], "complete"
             )
-            self.assertEqual(runs[0]["tasks"]["idle"]["status"], "complete")
-            self.assertTrue(Path(runs[0]["artifacts"]["package"]).is_file())
+            for state in BASIC_POSE_IDS:
+                self.assertEqual(
+                    runs[0]["tasks"][state]["status"], "complete"
+                )
+            package_path = Path(runs[0]["artifacts"]["package"])
+            self.assertTrue(package_path.is_file())
+            config = ConfigManager(str(data_root / "config.json"))
+            package_manager = CharacterPackageManager(
+                config,
+                root=data_root / "characters",
+            )
+            inspected = package_manager.inspect_zip(str(package_path))
+            self.assertEqual(inspected.schema_version, "2.0")
+            self.assertEqual(inspected.quality_tier, "basic")
 
 
 if __name__ == "__main__":
