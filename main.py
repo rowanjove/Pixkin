@@ -75,6 +75,7 @@ class DesktopPetApp:
         self._quitting = False
         self._quit_finalized = False
         self._monitor_restart_pending = False
+        self._settings_window = None
 
         self._instance_lock = QLockFile(
             str(user_data_dir() / "pixkin.instance.lock")
@@ -517,9 +518,43 @@ class DesktopPetApp:
         )
 
     def _open_settings(self):
+        current = getattr(self, "_settings_window", None)
+        if current is not None:
+            try:
+                if current.isMinimized():
+                    current.showNormal()
+                else:
+                    current.show()
+                current.raise_()
+                current.activateWindow()
+                return current
+            except RuntimeError:
+                self._settings_window = None
+
         previous_prompt = self.config_mgr.get("pet", "system_prompt", "")
         dialog = SettingsWindow(self.config_mgr, self.package_manager)
-        result = dialog.exec()
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._settings_window = dialog
+        dialog.finished.connect(
+            lambda result, expected=dialog, prompt=previous_prompt:
+            self._on_settings_finished(expected, result, prompt)
+        )
+        dialog.destroyed.connect(
+            lambda _object=None, expected=dialog:
+            self._clear_settings_window(expected)
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _clear_settings_window(self, expected):
+        if getattr(self, "_settings_window", None) is expected:
+            self._settings_window = None
+
+    def _on_settings_finished(self, dialog, result, previous_prompt):
+        self._clear_settings_window(dialog)
         if dialog.character_changed:
             package = self.package_manager.get_active()
             if package:
@@ -529,7 +564,7 @@ class DesktopPetApp:
         )
         if dialog.character_changed or prompt_changed:
             self._reset_chat_context()
-        if result != QDialog.DialogCode.Accepted:
+        if int(result) != int(QDialog.DialogCode.Accepted):
             return
         package = self.package_manager.get_active()
         self.pet_window.set_character(package)
