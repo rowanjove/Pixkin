@@ -243,13 +243,22 @@ class UiSmokeTests(unittest.TestCase):
             self.assertIn("生成失败", lab.run_health.text())
             self.assertTrue(lab.diagnostic_btn.isEnabled())
             self.assertTrue(lab.copy_diagnostic_btn.isEnabled())
+            self.assertTrue(lab.copy_issue_btn.isEnabled())
             self.assertTrue(lab.export_diagnostic_btn.isEnabled())
+            self.assertTrue(lab.inspect_issue_btn.isEnabled())
 
             lab._copy_generation_summary()
 
             copied = QApplication.clipboard().text()
             self.assertIn("Pixkin 伙伴工坊技术摘要", copied)
             self.assertNotIn("usage-run", copied)
+
+            lab._copy_github_issue_markdown()
+
+            copied_issue = QApplication.clipboard().text()
+            self.assertIn("## 问题概述", copied_issue)
+            self.assertIn("## 自动诊断", copied_issue)
+            self.assertNotIn("usage-run", copied_issue)
 
             destination = Path(directory) / "issue.zip"
             with (
@@ -262,6 +271,17 @@ class UiSmokeTests(unittest.TestCase):
                 lab._export_generation_issue_bundle()
 
             self.assertTrue(destination.is_file())
+            with (
+                patch(
+                    "ui.pet_lab_window.QFileDialog.getOpenFileName",
+                    return_value=(str(destination), "ZIP"),
+                ),
+                patch.object(QMessageBox, "information") as information,
+            ):
+                lab._inspect_generation_issue_bundle()
+
+            information.assert_called_once()
+            self.assertIn("检查通过", information.call_args.args[1])
             lab.close()
 
     def test_chat_escapes_user_html(self):

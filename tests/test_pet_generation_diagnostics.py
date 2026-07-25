@@ -4,7 +4,10 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from core.pet_generation_diagnostics import PetGenerationDiagnostics
+from core.pet_generation_diagnostics import (
+    IssueBundleError,
+    PetGenerationDiagnostics,
+)
 
 
 class PetGenerationDiagnosticsTests(unittest.TestCase):
@@ -262,6 +265,78 @@ class PetGenerationDiagnosticsTests(unittest.TestCase):
             self.assertFalse(
                 manifest["privacy"]["api_keys_included"]
             )
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(
+                set(manifest["files"]),
+                names - {"manifest.json"},
+            )
+
+            inspection = (
+                PetGenerationDiagnostics.inspect_issue_bundle(destination)
+            )
+            self.assertTrue(inspection["valid"])
+            self.assertEqual(
+                inspection["anonymous_run_id"],
+                result["anonymous_run_id"],
+            )
+            self.assertEqual(set(inspection["contents"]), names)
+            self.assertEqual(
+                set(inspection["reports"]),
+                {"reports/qa_report.json"},
+            )
+
+    def test_issue_bundle_inspection_rejects_tampered_content(self):
+        record = {
+            "id": "tamper-test",
+            "status": "pending",
+            "stage": "created",
+            "request": {},
+            "tasks": {"canonical": self._task("pending")},
+            "metrics": {"api_calls": []},
+            "artifacts": {},
+            "error": None,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "issue.zip"
+            PetGenerationDiagnostics.build_issue_bundle(
+                record,
+                workspace=base,
+                destination=source,
+            )
+            with zipfile.ZipFile(source) as archive:
+                documents = {
+                    name: archive.read(name)
+                    for name in archive.namelist()
+                }
+            documents["diagnostic.json"] = documents[
+                "diagnostic.json"
+            ].replace(b'"healthy"', b'"altered"', 1)
+            tampered = base / "tampered.zip"
+            with zipfile.ZipFile(tampered, "w") as archive:
+                for name, payload in documents.items():
+                    archive.writestr(name, payload)
+
+            with self.assertRaisesRegex(
+                IssueBundleError,
+                "哈希校验失败",
+            ):
+                PetGenerationDiagnostics.inspect_issue_bundle(tampered)
+
+    def test_issue_bundle_inspection_rejects_non_whitelisted_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "unsafe.zip"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("manifest.json", "{}")
+                archive.writestr("diagnostic.json", "{}")
+                archive.writestr("run-summary.json", "{}")
+                archive.writestr("../private.png", b"not-an-image")
+
+            with self.assertRaisesRegex(
+                IssueBundleError,
+                "不受支持",
+            ):
+                PetGenerationDiagnostics.inspect_issue_bundle(source)
 
     def test_technical_summary_contains_no_run_identifier(self):
         report = PetGenerationDiagnostics.summarize({
@@ -279,6 +354,32 @@ class PetGenerationDiagnosticsTests(unittest.TestCase):
 
         self.assertIn("Pixkin 伙伴工坊技术摘要", summary)
         self.assertNotIn("private-character-name", summary)
+
+
+    def test_github_issue_markdown_is_copy_ready_and_anonymous(self):
+        report = PetGenerationDiagnostics.summarize({
+            "id": "private-run-id",
+            "status": "failed",
+            "stage": "failed",
+            "request": {"max_api_calls": 8},
+            "tasks": {"canonical": self._task("failed", 1)},
+            "metrics": {"api_calls": []},
+            "artifacts": {},
+            "error": "private raw error",
+        })
+
+        markdown = PetGenerationDiagnostics.github_issue_markdown(
+            report,
+            bundle_filename=r"C:\private\Pixkin-Issue.zip",
+        )
+
+        self.assertIn("## 问题概述", markdown)
+        self.assertIn("## 复现步骤", markdown)
+        self.assertIn("## 自动诊断", markdown)
+        self.assertIn("`Pixkin-Issue.zip`", markdown)
+        self.assertNotIn("private-run-id", markdown)
+        self.assertNotIn("private raw error", markdown)
+        self.assertNotIn(r"C:\private", markdown)
 
 
 if __name__ == "__main__":

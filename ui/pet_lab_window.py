@@ -18,7 +18,10 @@ from core.pet_generation_run import (
     PetGenerationRunError,
     PetGenerationRunStore,
 )
-from core.pet_generation_diagnostics import PetGenerationDiagnostics
+from core.pet_generation_diagnostics import (
+    IssueBundleError,
+    PetGenerationDiagnostics,
+)
 from core.pet_generator import PetGenerationWorker
 from core.secrets import SecretStore
 from ui.theme import resolved_theme
@@ -338,9 +341,26 @@ class PetLabWindow(QDialog):
         )
         health_row.addWidget(self.run_health, 1)
         health_row.addWidget(self.diagnostic_btn)
-        health_row.addWidget(self.copy_diagnostic_btn)
-        health_row.addWidget(self.export_diagnostic_btn)
         layout.addLayout(health_row)
+
+        support_row = QHBoxLayout()
+        self.copy_issue_btn = QPushButton("复制 Issue")
+        self.copy_issue_btn.setObjectName("secondary")
+        self.copy_issue_btn.setEnabled(False)
+        self.copy_issue_btn.clicked.connect(
+            self._copy_github_issue_markdown
+        )
+        self.inspect_issue_btn = QPushButton("检查问题包")
+        self.inspect_issue_btn.setObjectName("secondary")
+        self.inspect_issue_btn.clicked.connect(
+            self._inspect_generation_issue_bundle
+        )
+        support_row.addStretch()
+        support_row.addWidget(self.copy_diagnostic_btn)
+        support_row.addWidget(self.copy_issue_btn)
+        support_row.addWidget(self.export_diagnostic_btn)
+        support_row.addWidget(self.inspect_issue_btn)
+        layout.addLayout(support_row)
 
         retry_row = QHBoxLayout()
         self.retry_task_input = QComboBox()
@@ -1123,6 +1143,7 @@ class PetLabWindow(QDialog):
             self.candidate_btn.setEnabled(False)
             self.diagnostic_btn.setEnabled(False)
             self.copy_diagnostic_btn.setEnabled(False)
+            self.copy_issue_btn.setEnabled(False)
             self.export_diagnostic_btn.setEnabled(False)
             self.run_health.setText(
                 "选择未完成任务后显示批次健康状态。"
@@ -1135,12 +1156,14 @@ class PetLabWindow(QDialog):
             self.candidate_btn.setEnabled(False)
             self.diagnostic_btn.setEnabled(False)
             self.copy_diagnostic_btn.setEnabled(False)
+            self.copy_issue_btn.setEnabled(False)
             self.export_diagnostic_btn.setEnabled(False)
             self.run_health.setText("任务记录无法读取。")
             return
         self._update_run_health(record)
         self.diagnostic_btn.setEnabled(True)
         self.copy_diagnostic_btn.setEnabled(True)
+        self.copy_issue_btn.setEnabled(True)
         self.export_diagnostic_btn.setEnabled(True)
         for task_id, task in record["tasks"].items():
             candidate_count = len(task.get("candidates", []))
@@ -1246,6 +1269,27 @@ class PetLabWindow(QDialog):
             "脱敏技术摘要已复制；其中不含 API Key、角色描述或本地路径。"
         )
 
+    def _copy_github_issue_markdown(self):
+        run_id = self.run_input.currentData()
+        if not run_id:
+            return
+        try:
+            report = PetGenerationDiagnostics.summarize(
+                self.run_store.load(run_id)
+            )
+        except PetGenerationRunError as exc:
+            self._on_error(str(exc))
+            return
+        QApplication.clipboard().setText(
+            PetGenerationDiagnostics.github_issue_markdown(
+                report,
+                bundle_filename="Pixkin-Issue.zip",
+            )
+        )
+        self.status.setText(
+            "GitHub Issue 模板已复制；请补充复现步骤后附上匿名问题包。"
+        )
+
     def _export_generation_issue_bundle(self):
         run_id = self.run_input.currentData()
         if not run_id:
@@ -1276,8 +1320,39 @@ class PetLabWindow(QDialog):
             self,
             "匿名问题包已导出",
             "问题包只包含脱敏诊断与 QA JSON；"
-            "不包含参考图、生成图片、API Key、角色名字或自由文本设定。",
+            "不包含参考图、生成图片、API Key、角色名字或自由文本设定；"
+            "清单已记录每个文件的 SHA-256 哈希。",
         )
+
+    def _inspect_generation_issue_bundle(self):
+        source, _ = QFileDialog.getOpenFileName(
+            self,
+            "检查 Pixkin 问题包",
+            "",
+            "ZIP 压缩包 (*.zip)",
+        )
+        if not source:
+            return
+        try:
+            result = PetGenerationDiagnostics.inspect_issue_bundle(
+                Path(source)
+            )
+        except (OSError, IssueBundleError) as exc:
+            self._on_error(f"问题包检查失败：{exc}")
+            return
+        diagnostic = result["diagnostic"]
+        QMessageBox.information(
+            self,
+            "问题包检查通过",
+            (
+                f"匿名编号：{result['anonymous_run_id']}\n"
+                f"健康状态：{diagnostic.get('health', 'unknown')}\n"
+                f"流程阶段：{diagnostic.get('stage', 'unknown')}\n"
+                f"文件数量：{len(result['contents'])}\n\n"
+                "检查过程只读取 ZIP 内的白名单 JSON，未解压文件。"
+            ),
+        )
+        self.status.setText("问题包完整性与隐私结构检查通过。")
 
     def _on_task_tool_changed(self, _index=None):
         run_id = self.run_input.currentData()
