@@ -1,10 +1,12 @@
 import json
+import shutil
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
+    QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QInputDialog,
     QProgressBar, QPushButton, QTextEdit, QVBoxLayout,
 )
@@ -284,12 +286,21 @@ class PetLabWindow(QDialog):
 
         retry_row = QHBoxLayout()
         self.retry_task_input = QComboBox()
-        self.retry_task_input.setToolTip("仅重新生成失败或取消的单个动作")
+        self.retry_task_input.setToolTip("选择要重试或切换历史版本的任务")
+        self.retry_task_input.currentIndexChanged.connect(
+            self._on_task_tool_changed
+        )
         self.retry_btn = QPushButton("重试选中动作")
         self.retry_btn.setObjectName("secondary")
         self.retry_btn.clicked.connect(self._retry_selected_task)
+        self.candidate_btn = QPushButton("查看候选版本")
+        self.candidate_btn.setObjectName("secondary")
+        self.candidate_btn.clicked.connect(
+            self._choose_selected_candidate
+        )
         retry_row.addWidget(self.retry_task_input, 1)
         retry_row.addWidget(self.retry_btn)
+        retry_row.addWidget(self.candidate_btn)
         layout.addLayout(retry_row)
 
         footer = QHBoxLayout()
@@ -407,6 +418,7 @@ class PetLabWindow(QDialog):
         self.hatch_btn.setDisabled(True)
         self.continue_btn.setDisabled(True)
         self.retry_btn.setDisabled(True)
+        self.candidate_btn.setDisabled(True)
         self.progress.show()
         self.progress.setValue(0)
         worker.start()
@@ -440,6 +452,13 @@ class PetLabWindow(QDialog):
                 run_id, "canonical_generation", status="pending"
             )
             self._resume_run(run_id, retry_task_id="canonical")
+        elif decision == "switched":
+            canonical = (
+                self.run_store.workspace(run_id)
+                / "images"
+                / "canonical.png"
+            )
+            self._on_review_ready(run_id, str(canonical))
         else:
             self.run_store.record_review(run_id, "canonical", "deferred")
             self.status.setText(
@@ -465,6 +484,11 @@ class PetLabWindow(QDialog):
         later = dialog.addButton(
             "稍后处理", QMessageBox.ButtonRole.RejectRole
         )
+        history = None
+        if self._candidate_count(self.active_run_id, "canonical") > 1:
+            history = dialog.addButton(
+                "查看历史版本", QMessageBox.ButtonRole.ActionRole
+            )
         pixmap = QPixmap(image_path)
         if not pixmap.isNull():
             dialog.setIconPixmap(pixmap.scaled(
@@ -480,6 +504,14 @@ class PetLabWindow(QDialog):
         if clicked is regenerate:
             return "rejected"
         if clicked is later:
+            return "deferred"
+        if history is not None and clicked is history:
+            if self._choose_candidate_version(
+                self.active_run_id,
+                "canonical",
+                continue_flow=False,
+            ):
+                return "switched"
             return "deferred"
         return "deferred"
 
@@ -517,6 +549,8 @@ class PetLabWindow(QDialog):
                 run_id, "action_generation", status="pending"
             )
             self._resume_run(run_id, retry_task_id=task_id)
+        elif result[0] == "switched":
+            self._resume_run(run_id)
         else:
             self.run_store.record_review(
                 run_id, "core_actions", "deferred"
@@ -552,6 +586,8 @@ class PetLabWindow(QDialog):
                 run_id, "action_generation", status="pending"
             )
             self._resume_run(run_id, retry_task_id=task_id)
+        elif result[0] == "switched":
+            self._resume_run(run_id)
         else:
             self.run_store.record_review(
                 run_id, "automatic_qa", "deferred"
@@ -605,6 +641,15 @@ class PetLabWindow(QDialog):
         retry = dialog.addButton(
             "选择动作返工", QMessageBox.ButtonRole.DestructiveRole
         )
+        history = None
+        versioned_tasks = self._tasks_with_candidates(
+            self.active_run_id,
+            report.get("expected_states", []),
+        )
+        if versioned_tasks:
+            history = dialog.addButton(
+                "查看候选版本", QMessageBox.ButtonRole.ActionRole
+            )
         later = dialog.addButton(
             "稍后处理", QMessageBox.ButtonRole.RejectRole
         )
@@ -620,6 +665,26 @@ class PetLabWindow(QDialog):
         clicked = dialog.clickedButton()
         if accept is not None and clicked is accept:
             return "accepted", None
+        if history is not None and clicked is history:
+            task_id = versioned_tasks[0]
+            if len(versioned_tasks) > 1:
+                task_id, confirmed = QInputDialog.getItem(
+                    self,
+                    "选择动作",
+                    "查看哪个动作的候选版本：",
+                    versioned_tasks,
+                    0,
+                    False,
+                )
+                if not confirmed:
+                    return "deferred", None
+            if self._choose_candidate_version(
+                self.active_run_id,
+                task_id,
+                continue_flow=False,
+            ):
+                return "switched", task_id
+            return "deferred", None
         if clicked is not retry:
             return "deferred", None
 
@@ -813,25 +878,230 @@ class PetLabWindow(QDialog):
         self.retry_task_input.clear()
         run_id = self.run_input.currentData()
         if not run_id:
-            self.retry_task_input.addItem("没有可重试动作", None)
+            self.retry_task_input.addItem("没有可用的任务工具", None)
             self.retry_btn.setEnabled(False)
+            self.candidate_btn.setEnabled(False)
             return
         try:
             record = self.run_store.load(run_id)
         except PetGenerationRunError:
             self.retry_btn.setEnabled(False)
+            self.candidate_btn.setEnabled(False)
             return
         for task_id, task in record["tasks"].items():
-            if task["status"] in {"failed", "canceled"}:
+            candidate_count = len(task.get("candidates", []))
+            if (
+                task["status"] in {"failed", "canceled"}
+                or candidate_count > 1
+            ):
+                details = []
+                if task["status"] in {"failed", "canceled"}:
+                    details.append(task["status"])
+                if candidate_count > 1:
+                    details.append(f"{candidate_count} 个候选")
                 self.retry_task_input.addItem(
-                    f"{task_id} · {task['status']}", task_id
+                    f"{task_id} · {' · '.join(details)}", task_id
                 )
         if self.retry_task_input.count() == 0:
-            self.retry_task_input.addItem("没有可重试动作", None)
+            self.retry_task_input.addItem("没有可用的任务工具", None)
+        self._on_task_tool_changed()
+
+    def _on_task_tool_changed(self, _index=None):
+        run_id = self.run_input.currentData()
+        task_id = self.retry_task_input.currentData()
         busy = self.worker is not None and self.worker.isRunning()
-        self.retry_btn.setEnabled(
-            self.retry_task_input.currentData() is not None and not busy
+        retryable = False
+        candidate_count = 0
+        if run_id and task_id:
+            try:
+                task = self.run_store.load(run_id)["tasks"][task_id]
+                retryable = task["status"] in {"failed", "canceled"}
+                candidate_count = len(task.get("candidates", []))
+            except (KeyError, PetGenerationRunError):
+                pass
+        self.retry_btn.setEnabled(retryable and not busy)
+        self.candidate_btn.setEnabled(candidate_count > 1 and not busy)
+
+    def _choose_selected_candidate(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        run_id = self.run_input.currentData()
+        task_id = self.retry_task_input.currentData()
+        if run_id and task_id:
+            self._choose_candidate_version(run_id, task_id)
+
+    def _choose_candidate_version(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        continue_flow: bool = True,
+    ) -> bool:
+        try:
+            record = self.run_store.load(run_id)
+            task = record["tasks"][task_id]
+        except (KeyError, PetGenerationRunError) as exc:
+            self._on_error(str(exc))
+            return False
+        candidates = task.get("candidates", [])
+        if len(candidates) < 2:
+            return False
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"选择 {task_id} 候选版本")
+        dialog.setMinimumSize(620, 500)
+        dialog.resize(620, 500)
+        layout = QVBoxLayout(dialog)
+        copy = QLabel(
+            "所有原始结果都会保留。选择一个版本作为当前精灵，"
+            "随后重新执行受影响的审核与 QA。"
         )
+        copy.setWordWrap(True)
+        copy.setObjectName("muted")
+        layout.addWidget(copy)
+        candidate_list = QListWidget()
+        candidate_list.setViewMode(QListWidget.ViewMode.IconMode)
+        candidate_list.setIconSize(QSize(150, 162))
+        candidate_list.setGridSize(QSize(180, 205))
+        candidate_list.setSpacing(6)
+        candidate_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        candidate_list.setMovement(QListWidget.Movement.Static)
+        layout.addWidget(candidate_list, 1)
+        selected_item = None
+        for index, candidate in enumerate(candidates, start=1):
+            sprite_path = self.run_store.artifact_path(
+                run_id, candidate["sprite_artifact"]
+            )
+            label = f"版本 {index} · {candidate['id']}"
+            if candidate["id"] == task.get("selected_candidate"):
+                label += " · 当前"
+            item = QListWidgetItem(
+                QIcon(QPixmap(str(sprite_path))),
+                label,
+            )
+            item.setData(
+                Qt.ItemDataRole.UserRole, candidate["id"]
+            )
+            item.setToolTip(str(sprite_path))
+            candidate_list.addItem(item)
+            if candidate["id"] == task.get("selected_candidate"):
+                selected_item = item
+        if selected_item is not None:
+            candidate_list.setCurrentItem(selected_item)
+        elif candidate_list.count():
+            candidate_list.setCurrentRow(0)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(
+            QDialogButtonBox.StandardButton.Ok
+        ).setText("使用此版本")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        candidate_list.itemDoubleClicked.connect(
+            lambda _item: dialog.accept()
+        )
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        item = candidate_list.currentItem()
+        if item is None:
+            return False
+        candidate_id = item.data(Qt.ItemDataRole.UserRole)
+        if candidate_id == task.get("selected_candidate"):
+            return False
+
+        if task_id == "canonical" and any(
+            other_id != "canonical"
+            and other["status"] == "complete"
+            for other_id, other in record["tasks"].items()
+        ):
+            answer = QMessageBox.warning(
+                self,
+                "切换身份稿会使动作失效",
+                "已有动作基于另一个身份版本。切换后会保留它们的候选文件，"
+                "但必须重新生成动作。确定继续吗？",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+
+        candidate = next(
+            item for item in candidates
+            if item["id"] == candidate_id
+        )
+        source = self.run_store.artifact_path(
+            run_id, candidate["sprite_artifact"]
+        )
+        active_artifact = (
+            "images/canonical.png"
+            if task_id == "canonical"
+            else f"images/{task_id}.png"
+        )
+        target = self.run_store.artifact_path(
+            run_id, active_artifact
+        )
+        if not source.is_file():
+            self._on_error(f"候选版本文件不存在：{source}")
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        self.run_store.select_candidate(
+            run_id,
+            task_id,
+            candidate_id,
+            active_artifact=active_artifact,
+        )
+        self.run_store.invalidate_after_candidate_selection(
+            run_id,
+            task_id,
+            core_task_ids=(
+                "idle", "talking", "dragging", "alerting"
+            ),
+        )
+        self.active_run_id = run_id
+        self.status.setText(
+            f"已切换 {task_id} 到 {candidate_id}，"
+            "受影响的审核与 QA 将重新执行。"
+        )
+        self._refresh_runs(run_id)
+        if continue_flow:
+            if task_id == "canonical":
+                self._on_review_ready(run_id, str(target))
+            else:
+                self._resume_run(run_id)
+        return True
+
+    def _candidate_count(self, run_id, task_id):
+        if not run_id:
+            return 0
+        try:
+            return len(
+                self.run_store.load(run_id)["tasks"][task_id].get(
+                    "candidates", []
+                )
+            )
+        except (KeyError, PetGenerationRunError):
+            return 0
+
+    def _tasks_with_candidates(self, run_id, task_ids):
+        if not run_id:
+            return []
+        try:
+            tasks = self.run_store.load(run_id)["tasks"]
+        except PetGenerationRunError:
+            return []
+        return [
+            task_id
+            for task_id in task_ids
+            if (
+                task_id in tasks
+                and len(tasks[task_id].get("candidates", [])) > 1
+            )
+        ]
 
     def _continue_run(self):
         if self.worker is not None and self.worker.isRunning():
@@ -895,7 +1165,19 @@ class PetLabWindow(QDialog):
 
     def _resume_run(self, run_id: str, retry_task_id=None):
         api_key = self.api_key.text().strip()
-        if not api_key:
+        try:
+            record = self.run_store.load(run_id)
+        except PetGenerationRunError as exc:
+            self._on_error(str(exc))
+            return
+        needs_generation = (
+            retry_task_id is not None
+            or any(
+                task["status"] != "complete"
+                for task in record["tasks"].values()
+            )
+        )
+        if not api_key and needs_generation:
             QMessageBox.warning(
                 self,
                 "需要图像 API Key",

@@ -9,7 +9,7 @@ import re
 import tempfile
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional
 
 from core.paths import user_data_dir
@@ -26,6 +26,7 @@ RUN_STATUSES = {
     "canceled",
 }
 TASK_STATUSES = {"pending", "running", "complete", "failed", "canceled"}
+CANDIDATE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 
 
 def _utc_now() -> str:
@@ -61,6 +62,8 @@ class PetGenerationRunStore:
                 "status": "pending",
                 "attempts": 0,
                 "artifact": None,
+                "candidates": [],
+                "selected_candidate": None,
                 "error": None,
                 "updated_at": now,
             }
@@ -88,6 +91,10 @@ class PetGenerationRunStore:
     def workspace(self, run_id: str) -> Path:
         return self.root / self._validated_run_id(run_id)
 
+    def artifact_path(self, run_id: str, artifact: str) -> Path:
+        relative = self._validated_artifact_path(artifact)
+        return self.workspace(run_id).joinpath(*relative.parts)
+
     def load(self, run_id: str) -> Dict[str, Any]:
         path = self._manifest_path(run_id)
         try:
@@ -101,6 +108,10 @@ class PetGenerationRunStore:
         # Early v1 manifests did not contain review decisions. Keep them
         # resumable instead of forcing users to discard generated artwork.
         record.setdefault("reviews", {})
+        for task in record.get("tasks", {}).values():
+            if isinstance(task, dict):
+                task.setdefault("candidates", [])
+                task.setdefault("selected_candidate", None)
         self._validate_record(record, run_id)
         return record
 
@@ -190,6 +201,130 @@ class PetGenerationRunStore:
         self._write(record)
         return copy.deepcopy(record)
 
+    def record_candidate(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        candidate_id: str,
+        source_artifact: str,
+        sprite_artifact: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        record = self.load(run_id)
+        if task_id not in record["tasks"]:
+            raise PetGenerationRunError(f"找不到动作任务：{task_id}")
+        candidate_id = self._validated_candidate_id(candidate_id)
+        task = record["tasks"][task_id]
+        if any(
+            item.get("id") == candidate_id
+            for item in task["candidates"]
+        ):
+            raise PetGenerationRunError(
+                f"候选版本已经存在：{candidate_id}"
+            )
+        now = _utc_now()
+        source_artifact = self._validated_artifact_path(
+            source_artifact
+        ).as_posix()
+        sprite_artifact = self._validated_artifact_path(
+            sprite_artifact
+        ).as_posix()
+        task["candidates"].append({
+            "id": candidate_id,
+            "created_at": now,
+            "source_artifact": str(source_artifact),
+            "sprite_artifact": str(sprite_artifact),
+            "metadata": copy.deepcopy(metadata or {}),
+        })
+        task["selected_candidate"] = candidate_id
+        task["updated_at"] = now
+        record["updated_at"] = now
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def select_candidate(
+        self,
+        run_id: str,
+        task_id: str,
+        candidate_id: str,
+        *,
+        active_artifact: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        record = self.load(run_id)
+        if task_id not in record["tasks"]:
+            raise PetGenerationRunError(f"找不到动作任务：{task_id}")
+        candidate_id = self._validated_candidate_id(candidate_id)
+        task = record["tasks"][task_id]
+        candidate = next(
+            (
+                item for item in task["candidates"]
+                if item.get("id") == candidate_id
+            ),
+            None,
+        )
+        if candidate is None:
+            raise PetGenerationRunError(
+                f"找不到候选版本：{candidate_id}"
+            )
+        now = _utc_now()
+        task["selected_candidate"] = candidate_id
+        task["status"] = "complete"
+        task["error"] = None
+        if active_artifact is not None:
+            task["artifact"] = self._validated_artifact_path(
+                active_artifact
+            ).as_posix()
+        task["updated_at"] = now
+        record["updated_at"] = now
+        record["error"] = None
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def invalidate_after_candidate_selection(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        core_task_ids: Iterable[str] = (),
+    ) -> Dict[str, Any]:
+        record = self.load(run_id)
+        if task_id not in record["tasks"]:
+            raise PetGenerationRunError(f"找不到动作任务：{task_id}")
+        now = _utc_now()
+        record["reviews"].pop("automatic_qa", None)
+        record["reviews"].pop("final_package", None)
+        for key in (
+            "core_contact_sheet",
+            "core_qa_report",
+            "qa_contact_sheet",
+            "qa_report",
+            "package",
+            "installed_package_id",
+        ):
+            record["artifacts"].pop(key, None)
+        if task_id == "canonical":
+            record["reviews"].pop("canonical", None)
+            record["reviews"].pop("core_actions", None)
+            for other_id, task in record["tasks"].items():
+                if other_id == "canonical":
+                    continue
+                task["status"] = "pending"
+                task["artifact"] = None
+                task["error"] = None
+                task["updated_at"] = now
+            record["stage"] = "canonical_review"
+            record["status"] = "needs_review"
+        else:
+            if task_id in set(core_task_ids):
+                record["reviews"].pop("core_actions", None)
+            record["stage"] = "action_generation"
+            record["status"] = "pending"
+        record["error"] = None
+        record["updated_at"] = now
+        self._write(record)
+        return copy.deepcopy(record)
+
     def update_task(
         self,
         run_id: str,
@@ -249,6 +384,28 @@ class PetGenerationRunStore:
         return value
 
     @staticmethod
+    def _validated_candidate_id(candidate_id: str) -> str:
+        value = str(candidate_id)
+        if not CANDIDATE_ID_PATTERN.fullmatch(value):
+            raise PetGenerationRunError(f"候选版本 ID 不安全：{value}")
+        return value
+
+    @staticmethod
+    def _validated_artifact_path(artifact: str) -> PurePosixPath:
+        value = str(artifact).replace("\\", "/")
+        path = PurePosixPath(value)
+        if (
+            not value
+            or path.is_absolute()
+            or ".." in path.parts
+            or "." in path.parts
+        ):
+            raise PetGenerationRunError(
+                f"候选产物路径不安全：{artifact}"
+            )
+        return path
+
+    @staticmethod
     def _validate_record(record: Dict[str, Any], expected_id: str) -> None:
         if not isinstance(record, dict):
             raise PetGenerationRunError("孵化任务记录必须是对象。")
@@ -264,3 +421,29 @@ class PetGenerationRunStore:
             raise PetGenerationRunError("孵化产物列表无效。")
         if not isinstance(record.get("reviews"), dict):
             raise PetGenerationRunError("孵化审核记录无效。")
+        for task in record["tasks"].values():
+            if not isinstance(task, dict):
+                raise PetGenerationRunError("孵化任务详情无效。")
+            if not isinstance(task.get("candidates"), list):
+                raise PetGenerationRunError("候选版本列表无效。")
+            candidate_ids = set()
+            for candidate in task["candidates"]:
+                if not isinstance(candidate, dict):
+                    raise PetGenerationRunError("候选版本详情无效。")
+                candidate_id = (
+                    PetGenerationRunStore._validated_candidate_id(
+                        candidate.get("id", "")
+                    )
+                )
+                if candidate_id in candidate_ids:
+                    raise PetGenerationRunError("候选版本 ID 重复。")
+                candidate_ids.add(candidate_id)
+                PetGenerationRunStore._validated_artifact_path(
+                    candidate.get("source_artifact", "")
+                )
+                PetGenerationRunStore._validated_artifact_path(
+                    candidate.get("sprite_artifact", "")
+                )
+            selected = task.get("selected_candidate")
+            if selected is not None and selected not in candidate_ids:
+                raise PetGenerationRunError("当前候选版本不存在。")

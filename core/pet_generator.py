@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import re
 import shutil
@@ -165,6 +166,7 @@ class PetGenerationWorker(QThread):
                 and canonical.is_file()
             )
             if self.retry_task_id == "canonical":
+                self._ensure_legacy_candidate("canonical", canonical)
                 self._run_store.reset_task(self.run_id, "canonical")
                 canonical_complete = False
             if not canonical_complete:
@@ -181,15 +183,15 @@ class PetGenerationWorker(QThread):
                     "running",
                     increment_attempt=True,
                 )
+                prompt = self._base_prompt()
                 base_bytes = self._generate(
-                    client, self.reference_paths, self._base_prompt()
+                    client, self.reference_paths, prompt
                 )
-                self._save_sprite(base_bytes, canonical)
-                self._run_store.update_task(
-                    self.run_id,
-                    "canonical",
-                    "complete",
-                    artifact="images/canonical.png",
+                self._store_candidate(
+                    task_id="canonical",
+                    raw=base_bytes,
+                    active_target=canonical,
+                    prompt=prompt,
                 )
                 self._active_task_id = None
                 if self.isInterruptionRequested():
@@ -269,8 +271,6 @@ class PetGenerationWorker(QThread):
                     )
                     return
 
-            self._validate_generation_inputs()
-            client = self._generation_client()
             self._run_store.update_stage(
                 self.run_id, "action_generation", status="running"
             )
@@ -285,7 +285,6 @@ class PetGenerationWorker(QThread):
                 if item[0] not in CORE_REVIEW_POSE_IDS
             ]
             self._generate_pose_group(
-                client=client,
                 canonical=canonical,
                 images_dir=images_dir,
                 pose_items=core_items,
@@ -335,7 +334,6 @@ class PetGenerationWorker(QThread):
                 return
 
             self._generate_pose_group(
-                client=client,
                 canonical=canonical,
                 images_dir=images_dir,
                 pose_items=remaining_items,
@@ -454,7 +452,6 @@ class PetGenerationWorker(QThread):
     def _generate_pose_group(
         self,
         *,
-        client,
         canonical,
         images_dir,
         pose_items,
@@ -480,9 +477,12 @@ class PetGenerationWorker(QThread):
                 generated[state] = target
                 continue
             if self.retry_task_id == state:
+                self._ensure_legacy_candidate(state, target)
                 self._run_store.reset_task(self.run_id, state)
             if self.isInterruptionRequested():
                 return
+            self._validate_generation_inputs()
+            client = self._generation_client()
             index = positions[state]
             percent = 10 + int(index / total * 80)
             self.progress_changed.emit(
@@ -495,19 +495,19 @@ class PetGenerationWorker(QThread):
                 increment_attempt=True,
             )
             self._active_task_id = state
+            prompt = self._pose_prompt(pose)
             pose_bytes = self._generate(
                 client,
                 [canonical, *self.reference_paths],
-                self._pose_prompt(pose),
+                prompt,
             )
-            self._save_sprite(pose_bytes, target)
+            self._store_candidate(
+                task_id=state,
+                raw=pose_bytes,
+                active_target=target,
+                prompt=prompt,
+            )
             generated[state] = target
-            self._run_store.update_task(
-                self.run_id,
-                state,
-                "complete",
-                artifact=f"images/{state}.png",
-            )
             self._active_task_id = None
 
     def _incomplete_states(self, images_dir, pose_items):
@@ -570,6 +570,101 @@ class PetGenerationWorker(QThread):
             self.run_id,
             {"reference_paths": [str(path) for path in copied]},
         )
+
+    def _store_candidate(
+        self,
+        *,
+        task_id: str,
+        raw: bytes,
+        active_target: Path,
+        prompt: str,
+    ):
+        record = self._run_store.load(self.run_id)
+        attempt = max(1, int(record["tasks"][task_id]["attempts"]))
+        candidate_id = f"attempt-{attempt:03d}"
+        candidate_dir = (
+            self._run_store.workspace(self.run_id)
+            / "candidates"
+            / task_id
+            / candidate_id
+        )
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        source_suffix = self._source_suffix(raw)
+        source_path = candidate_dir / f"source{source_suffix}"
+        sprite_path = candidate_dir / "sprite.png"
+        source_path.write_bytes(raw)
+        self._save_sprite(raw, sprite_path)
+        workspace = self._run_store.workspace(self.run_id)
+        source_artifact = source_path.relative_to(workspace).as_posix()
+        sprite_artifact = sprite_path.relative_to(workspace).as_posix()
+        active_artifact = active_target.relative_to(workspace).as_posix()
+        self._run_store.record_candidate(
+            self.run_id,
+            task_id,
+            candidate_id=candidate_id,
+            source_artifact=source_artifact,
+            sprite_artifact=sprite_artifact,
+            metadata={
+                "model": self.model or "gpt-image-2",
+                "quality": self.quality or "medium",
+                "prompt": prompt,
+                "source_sha256": hashlib.sha256(raw).hexdigest(),
+            },
+        )
+        active_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sprite_path, active_target)
+        self._run_store.select_candidate(
+            self.run_id,
+            task_id,
+            candidate_id,
+            active_artifact=active_artifact,
+        )
+        return candidate_id
+
+    def _ensure_legacy_candidate(
+        self,
+        task_id: str,
+        active_target: Path,
+    ):
+        record = self._run_store.load(self.run_id)
+        task = record["tasks"][task_id]
+        if task["candidates"] or not active_target.is_file():
+            return
+        workspace = self._run_store.workspace(self.run_id)
+        candidate_id = "legacy-001"
+        candidate_dir = (
+            workspace / "candidates" / task_id / candidate_id
+        )
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        source_path = candidate_dir / "source.png"
+        sprite_path = candidate_dir / "sprite.png"
+        shutil.copy2(active_target, source_path)
+        shutil.copy2(active_target, sprite_path)
+        self._run_store.record_candidate(
+            self.run_id,
+            task_id,
+            candidate_id=candidate_id,
+            source_artifact=source_path.relative_to(workspace).as_posix(),
+            sprite_artifact=sprite_path.relative_to(workspace).as_posix(),
+            metadata={"migrated_from_active_artifact": True},
+        )
+        active_artifact = active_target.relative_to(workspace).as_posix()
+        self._run_store.select_candidate(
+            self.run_id,
+            task_id,
+            candidate_id,
+            active_artifact=active_artifact,
+        )
+
+    @staticmethod
+    def _source_suffix(raw: bytes) -> str:
+        with Image.open(io.BytesIO(raw)) as image:
+            image_format = str(image.format or "").upper()
+        return {
+            "JPEG": ".jpg",
+            "PNG": ".png",
+            "WEBP": ".webp",
+        }.get(image_format, ".bin")
 
     def _mark_canceled(self):
         if self._run_store is not None and self.run_id:
