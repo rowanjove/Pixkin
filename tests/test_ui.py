@@ -178,6 +178,8 @@ class UiSmokeTests(unittest.TestCase):
         lab = PetLabWindow(self.config, self.package_manager)
         self.assertEqual(lab.mode_input.currentData(), "basic")
         self.assertIn("5 次图像生成", lab.status.text())
+        self.assertFalse(lab.symmetry_input.isEnabled())
+        self.assertEqual(lab.call_budget_input.value(), 8)
 
         lab.mode_input.setCurrentIndex(
             lab.mode_input.findData("standard")
@@ -185,6 +187,7 @@ class UiSmokeTests(unittest.TestCase):
 
         self.assertIn("20 次图像生成", lab.status.text())
         self.assertIn("实际费用", lab.status.text())
+        self.assertEqual(lab.call_budget_input.value(), 23)
 
         lab.mode_input.setCurrentIndex(
             lab.mode_input.findData("full")
@@ -193,7 +196,43 @@ class UiSmokeTests(unittest.TestCase):
         self.assertIn("45 次图像生成", lab.status.text())
         self.assertIn("四向贴边", lab.status.text())
         self.assertIn("显著高于", lab.status.text())
+        self.assertTrue(lab.symmetry_input.isEnabled())
+        self.assertEqual(lab.call_budget_input.value(), 48)
+
+        lab.symmetry_input.setChecked(True)
+
+        self.assertIn("39 次图像生成", lab.status.text())
+        self.assertEqual(lab.call_budget_input.minimum(), 39)
+        self.assertEqual(lab.call_budget_input.value(), 42)
         lab.close()
+
+    def test_pet_lab_run_list_displays_persisted_api_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            run = store.create(
+                run_id="usage-run",
+                request={
+                    "pet_name": "Nova",
+                    "mode": "basic",
+                    "max_api_calls": 8,
+                },
+                task_ids=["canonical"],
+            )
+            store.update_task(
+                run["id"],
+                "canonical",
+                "failed",
+                increment_attempt=True,
+            )
+
+            lab = PetLabWindow(
+                self.config,
+                self.package_manager,
+                run_store=store,
+            )
+
+            self.assertIn("API 1/8", lab.run_input.currentText())
+            lab.close()
 
     def test_chat_escapes_user_html(self):
         chat = ChatBubbleWindow()

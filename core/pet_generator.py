@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 from openai import OpenAI
-from PIL import Image
+from PIL import Image, ImageOps
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.pet_animation_builder import LOOP_STATES, PetAnimationBuilder
@@ -66,17 +66,17 @@ FULL_ONLY_POSES = {
     "annoyed": (
         "mildly annoyed but still friendly pose with a tiny pout"
     ),
-    "walk_left": (
-        "clear side-view walking pose facing left, one foot stepping forward"
-    ),
     "walk_right": (
         "clear side-view walking pose facing right, one foot stepping forward"
     ),
-    "run_left": (
-        "energetic side-view running pose facing left with compact limbs"
+    "walk_left": (
+        "clear side-view walking pose facing left, one foot stepping forward"
     ),
     "run_right": (
         "energetic side-view running pose facing right with compact limbs"
+    ),
+    "run_left": (
+        "energetic side-view running pose facing left with compact limbs"
     ),
     "jump": "upward jumping pose with both feet visibly off the ground",
     "land": "soft landing pose with bent knees and a stable low stance",
@@ -89,6 +89,7 @@ FULL_ONLY_POSES = {
 }
 
 EDGE_SIDES = ("left", "right", "top", "bottom")
+EDGE_GENERATION_SIDES = ("right", "left", "top", "bottom")
 EDGE_PHASES = ("enter", "idle", "hover", "exit")
 _EDGE_SIDE_PROMPTS = {
     "left": "toward the left screen edge while looking inward to the right",
@@ -108,7 +109,7 @@ EDGE_POSES = {
         "keep the complete body inside the image"
     )
     for phase in EDGE_PHASES
-    for side in EDGE_SIDES
+    for side in EDGE_GENERATION_SIDES
 }
 FULL_POSES = {
     **STANDARD_POSES,
@@ -121,6 +122,14 @@ STANDARD_POSE_IDS = tuple(STANDARD_POSES)
 FULL_POSE_IDS = tuple(FULL_POSES)
 CORE_REVIEW_POSE_IDS = BASIC_POSE_IDS
 GENERATION_MODES = {"basic", "legacy_full", "standard", "full"}
+HORIZONTAL_MIRROR_SOURCES = {
+    "walk_left": "walk_right",
+    "run_left": "run_right",
+    **{
+        f"edge_{phase}_left": f"edge_{phase}_right"
+        for phase in EDGE_PHASES
+    },
+}
 
 HARD_CARTOON_RULES = """
 NON-NEGOTIABLE OUTPUT RULES — these override every reference and style note:
@@ -162,6 +171,8 @@ class PetGenerationWorker(QThread):
         reference_paths,
         full_hatch: bool = True,
         generation_mode: str = None,
+        allow_horizontal_mirror: bool = False,
+        max_api_calls: int = None,
         run_id: str = None,
         run_store: PetGenerationRunStore = None,
         retry_task_id: str = None,
@@ -185,6 +196,23 @@ class PetGenerationWorker(QThread):
                 f"不支持的伙伴工坊生成模式：{self.generation_mode}"
             )
         self.full_hatch = self.generation_mode != "basic"
+        self.allow_horizontal_mirror = bool(
+            allow_horizontal_mirror
+            and self.generation_mode == "full"
+        )
+        if max_api_calls is None:
+            self.max_api_calls = (
+                None
+                if run_id is not None
+                else self.planned_api_calls(
+                    self.generation_mode,
+                    self.allow_horizontal_mirror,
+                ) + 3
+            )
+        else:
+            self.max_api_calls = int(max_api_calls)
+            if self.max_api_calls < 1:
+                raise ValueError("图像 API 调用预算必须至少为 1。")
         self._client = None
         self.run_id = run_id
         self._run_store = run_store
@@ -226,6 +254,10 @@ class PetGenerationWorker(QThread):
             reference_paths=request.get("reference_paths", []),
             full_hatch=generation_mode != "basic",
             generation_mode=generation_mode,
+            allow_horizontal_mirror=bool(
+                request.get("allow_horizontal_mirror", False)
+            ),
+            max_api_calls=request.get("max_api_calls"),
             run_id=run_id,
             run_store=store,
             retry_task_id=retry_task_id,
@@ -238,6 +270,42 @@ class PetGenerationWorker(QThread):
                 self._client.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def planned_api_calls(
+        generation_mode: str,
+        allow_horizontal_mirror: bool = False,
+    ) -> int:
+        pose_counts = {
+            "basic": len(BASIC_POSE_IDS),
+            "legacy_full": len(POSES),
+            "standard": len(STANDARD_POSE_IDS),
+            "full": len(FULL_POSE_IDS),
+        }
+        count = pose_counts.get(str(generation_mode))
+        if count is None:
+            raise ValueError(
+                f"不支持的伙伴工坊生成模式：{generation_mode}"
+            )
+        if generation_mode == "full" and allow_horizontal_mirror:
+            count -= len(HORIZONTAL_MIRROR_SOURCES)
+        return 1 + count
+
+    @staticmethod
+    def api_calls_used(record) -> int:
+        return sum(
+            max(0, int(task.get("attempts", 0)))
+            for task in (record.get("tasks") or {}).values()
+            if isinstance(task, dict)
+        )
+
+    @staticmethod
+    def mirror_dependents(source_state: str):
+        return tuple(
+            target
+            for target, source in HORIZONTAL_MIRROR_SOURCES.items()
+            if source == source_state
+        )
 
     def run(self):
         try:
@@ -257,6 +325,13 @@ class PetGenerationWorker(QThread):
                             str(path) for path in self.reference_paths
                         ],
                         "mode": self.generation_mode,
+                        "allow_horizontal_mirror":
+                            self.allow_horizontal_mirror,
+                        "planned_api_calls": self.planned_api_calls(
+                            self.generation_mode,
+                            self.allow_horizontal_mirror,
+                        ),
+                        "max_api_calls": self.max_api_calls,
                         "image_base_url": self.base_url,
                         "image_model": self.model,
                         "image_quality": self.quality,
@@ -289,12 +364,7 @@ class PetGenerationWorker(QThread):
                     self.run_id, "canonical_generation", status="running"
                 )
                 self._active_task_id = "canonical"
-                self._run_store.update_task(
-                    self.run_id,
-                    "canonical",
-                    "running",
-                    increment_attempt=True,
-                )
+                self._reserve_api_call("canonical")
                 prompt = self._base_prompt()
                 base_bytes = self._generate(
                     client, self.reference_paths, prompt
@@ -667,9 +737,31 @@ class PetGenerationWorker(QThread):
                 continue
             if self.retry_task_id == state:
                 self._ensure_legacy_candidate(state, target)
+                self._invalidate_mirror_dependents(state, generated)
                 self._run_store.reset_task(self.run_id, state)
             if self.isInterruptionRequested():
                 return
+            mirror_source = HORIZONTAL_MIRROR_SOURCES.get(state)
+            if (
+                self.allow_horizontal_mirror
+                and self.retry_task_id != state
+                and mirror_source in generated
+            ):
+                index = positions[state]
+                percent = 10 + int(index / total * 80)
+                self.progress_changed.emit(
+                    percent,
+                    f"正在从 {mirror_source} 安全镜像 {state}"
+                    f"（{index}/{total}）…",
+                )
+                self._store_mirrored_candidate(
+                    task_id=state,
+                    source_state=mirror_source,
+                    source_path=generated[mirror_source],
+                    active_target=target,
+                )
+                generated[state] = target
+                continue
             self._validate_generation_inputs()
             client = self._generation_client()
             index = positions[state]
@@ -677,12 +769,7 @@ class PetGenerationWorker(QThread):
             self.progress_changed.emit(
                 percent, f"正在绘制 {state} 姿态（{index}/{total}）…"
             )
-            self._run_store.update_task(
-                self.run_id,
-                state,
-                "running",
-                increment_attempt=True,
-            )
+            self._reserve_api_call(state)
             self._active_task_id = state
             prompt = self._pose_prompt(pose)
             pose_bytes = self._generate(
@@ -732,6 +819,22 @@ class PetGenerationWorker(QThread):
         for path in self.reference_paths:
             if not path.is_file():
                 raise ValueError(f"参考图不存在：{path}")
+
+    def _reserve_api_call(self, task_id: str):
+        record = self._run_store.load(self.run_id)
+        budget = record.get("request", {}).get("max_api_calls")
+        used = self.api_calls_used(record)
+        if budget is not None and used >= int(budget):
+            raise RuntimeError(
+                f"图像 API 调用预算已用尽（{used}/{int(budget)}）。"
+                "请在继续任务时提高预算，或保留当前产物稍后处理。"
+            )
+        self._run_store.update_task(
+            self.run_id,
+            task_id,
+            "running",
+            increment_attempt=True,
+        )
 
     def _generation_client(self):
         if self._client is None:
@@ -809,6 +912,72 @@ class PetGenerationWorker(QThread):
             active_artifact=active_artifact,
         )
         return candidate_id
+
+    def _store_mirrored_candidate(
+        self,
+        *,
+        task_id: str,
+        source_state: str,
+        source_path: Path,
+        active_target: Path,
+    ):
+        record = self._run_store.load(self.run_id)
+        task = record["tasks"][task_id]
+        mirror_index = 1 + sum(
+            str(candidate.get("id", "")).startswith("mirror-")
+            for candidate in task.get("candidates", [])
+        )
+        candidate_id = f"mirror-{mirror_index:03d}"
+        workspace = self._run_store.workspace(self.run_id)
+        candidate_dir = (
+            workspace / "candidates" / task_id / candidate_id
+        )
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        source_copy = candidate_dir / "source.png"
+        sprite_path = candidate_dir / "sprite.png"
+        shutil.copy2(source_path, source_copy)
+        with Image.open(source_path) as source:
+            mirrored = ImageOps.mirror(source.convert("RGBA"))
+        mirrored.save(sprite_path, "PNG", optimize=True)
+        source_artifact = source_copy.relative_to(workspace).as_posix()
+        sprite_artifact = sprite_path.relative_to(workspace).as_posix()
+        active_artifact = active_target.relative_to(workspace).as_posix()
+        self._run_store.record_candidate(
+            self.run_id,
+            task_id,
+            candidate_id=candidate_id,
+            source_artifact=source_artifact,
+            sprite_artifact=sprite_artifact,
+            metadata={
+                "derived": True,
+                "operation": "horizontal_mirror",
+                "mirror_of": source_state,
+                "source_sha256": hashlib.sha256(
+                    source_path.read_bytes()
+                ).hexdigest(),
+            },
+        )
+        active_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sprite_path, active_target)
+        self._run_store.select_candidate(
+            self.run_id,
+            task_id,
+            candidate_id,
+            active_artifact=active_artifact,
+        )
+        return candidate_id
+
+    def _invalidate_mirror_dependents(self, source_state, generated):
+        if not self.allow_horizontal_mirror:
+            return
+        record = self._run_store.load(self.run_id)
+        for task_id in self.mirror_dependents(source_state):
+            if (
+                task_id in record["tasks"]
+                and record["tasks"][task_id]["status"] == "complete"
+            ):
+                self._run_store.reset_task(self.run_id, task_id)
+                generated.pop(task_id, None)
 
     def _ensure_legacy_candidate(
         self,
@@ -1000,6 +1169,11 @@ class PetGenerationWorker(QThread):
             quality_tier = "standard"
         else:
             quality_tier = "basic"
+        api_calls_used = 0
+        if self.run_id and self._run_store is not None:
+            api_calls_used = self.api_calls_used(
+                self._run_store.load(self.run_id)
+            )
         metadata = {
             "schema_version": "2.0",
             "id": slug,
@@ -1106,6 +1280,14 @@ class PetGenerationWorker(QThread):
                 "pixkin_pet_lab": {
                     "animation_source": "procedural_micro_motion",
                     "generation_mode": self.generation_mode,
+                    "allow_horizontal_mirror":
+                        self.allow_horizontal_mirror,
+                    "planned_api_calls": self.planned_api_calls(
+                        self.generation_mode,
+                        self.allow_horizontal_mirror,
+                    ),
+                    "max_api_calls": self.max_api_calls,
+                    "api_calls_used": api_calls_used,
                     "key_pose_canvas": [192, 208],
                     "anchor": [96, 194],
                 },
