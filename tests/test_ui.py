@@ -20,12 +20,14 @@ from PyQt6.QtWidgets import (
 from core.character_package import (
     AnimationSpec, CharacterPackage, CharacterPackageManager, FrameSpec
 )
+from core.chat_history_store import ChatHistoryStore
 from core.config import ConfigManager
 from core.pet_animator import PetState
 from core.pet_generation_run import PetGenerationRunStore
 from core.secrets import SecretStore
 from core.tool_registry import ToolRegistry
 from ui.chat_window import BubbleShell, ChatBubbleWindow
+from ui.history_window import HistoryWindow
 from ui.onboarding_window import FirstRunWindow
 from ui.pet_lab_window import PetLabWindow
 from ui.pet_window import PetWindow
@@ -466,14 +468,133 @@ class UiSmokeTests(unittest.TestCase):
         chat.set_tool_schemas(registry.get_tools_schema())
         menu = chat._build_tool_menu()
         labels = [action.text() for action in menu.actions()]
+        toolbox = next(
+            action.menu()
+            for action in menu.actions()
+            if action.menu() is not None
+            and "实用百宝箱" in action.text()
+        )
+        tool_labels = [action.text() for action in toolbox.actions()]
 
-        self.assertIn("计算算式…", labels)
-        self.assertIn("打开网页…", labels)
-        self.assertIn("查看磁盘空间", labels)
-        self.assertIn("打开文件管理器", labels)
-        self.assertIn("7 项已连接", labels[0])
+        self.assertIn("🎲 来个随机脑洞", labels)
+        self.assertIn("🌙 抽一张今日心情签", labels)
+        self.assertIn("🧠 开启反向提问局", labels)
+        self.assertIn("神算子：计算算式…", tool_labels)
+        self.assertIn("传送门：打开网页…", tool_labels)
+        self.assertIn("查看磁盘空间", tool_labels)
+        self.assertIn("打开文件管理器", tool_labels)
+        self.assertIn("7 项", next(
+            action.text() for action in menu.actions()
+            if action.menu() is toolbox
+        ))
         menu.close()
         chat.close()
+
+    def test_character_switch_restores_each_roles_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DesktopPetApp.__new__(DesktopPetApp)
+            controller.chat_store = ChatHistoryStore(
+                Path(directory) / "history.sqlite3"
+            )
+            controller.pet_window = SimpleNamespace(
+                chat_window=ChatBubbleWindow()
+            )
+            controller.ai_worker = None
+            controller._history_window = None
+            shanshan = SimpleNamespace(
+                package_id="shanshan", name="山山"
+            )
+            linlin = SimpleNamespace(package_id="linlin", name="凛凛")
+
+            controller._activate_chat_for_package(shanshan)
+            controller._store_message("user", "只和山山说的话")
+            controller._reload_current_chat()
+            controller._activate_chat_for_package(linlin)
+            self.assertEqual(controller.chat_history_list, [])
+            controller._store_message("user", "只和凛凛说的话")
+            controller._reload_current_chat()
+
+            controller._activate_chat_for_package(shanshan)
+            self.assertEqual(
+                controller.chat_history_list,
+                [{"role": "user", "content": "只和山山说的话"}],
+            )
+            self.assertEqual(
+                controller.pet_window.chat_window._messages[-1]["content"],
+                "只和山山说的话",
+            )
+            controller.pet_window.chat_window.close()
+
+    def test_history_window_filters_exports_and_clears_selected_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            store = ChatHistoryStore(base / "history.sqlite3")
+            shanshan = store.create_session("shanshan", "山山")
+            linlin = store.create_session("linlin", "凛凛")
+            store.add_message(
+                shanshan, "user", "山山记录",
+                created_at="2026-07-25T09:00:00+08:00",
+            )
+            store.add_message(
+                linlin, "user", "凛凛记录",
+                created_at="2026-07-25T10:00:00+08:00",
+            )
+            window = HistoryWindow(
+                store, "shanshan", "山山", shanshan, self.config
+            )
+            window.date_list.setCurrentRow(1)
+            self.app.processEvents()
+            self.assertIn("山山记录", window.transcript.toPlainText())
+            self.assertNotIn("凛凛记录", window.transcript.toPlainText())
+
+            destination = base / "history.md"
+            with (
+                patch(
+                    "ui.history_window.QFileDialog.getSaveFileName",
+                    return_value=(str(destination), "Markdown (*.md)"),
+                ),
+                patch.object(QMessageBox, "information"),
+            ):
+                window._export_visible()
+            self.assertIn(
+                "山山记录", destination.read_text(encoding="utf-8")
+            )
+
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ):
+                window._clear_day()
+            remaining = store.list_messages(day="2026-07-25")
+            self.assertEqual(
+                [item["content"] for item in remaining], ["凛凛记录"]
+            )
+            window.close()
+
+    def test_history_window_opens_non_modal_and_reuses_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DesktopPetApp.__new__(DesktopPetApp)
+            controller.config_mgr = self.config
+            controller.chat_store = ChatHistoryStore(
+                Path(directory) / "history.sqlite3"
+            )
+            controller.active_character_id = "shanshan"
+            controller.active_character_name = "山山"
+            controller.current_session_id = (
+                controller.chat_store.create_session("shanshan", "山山")
+            )
+            controller._history_window = None
+
+            window = controller._open_history()
+            self.app.processEvents()
+            self.assertTrue(window.isVisible())
+            self.assertFalse(window.isModal())
+            self.assertIs(controller._open_history(), window)
+
+            window.close()
+            self.app.processEvents()
+            self.assertIsNone(controller._history_window)
 
     def test_user_profile_updates_right_side_message(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -504,6 +625,25 @@ class UiSmokeTests(unittest.TestCase):
         self.assertEqual(
             row.findChild(QLabel, "alertTitle").text(), "今晚一起画画"
         )
+        chat.close()
+
+    def test_chat_inserts_date_dividers_for_loaded_history(self):
+        chat = ChatBubbleWindow()
+        chat.load_messages([
+            {
+                "role": "user",
+                "content": "第一天",
+                "created_at": "2020-01-02T10:00:00+08:00",
+            },
+            {
+                "role": "assistant",
+                "content": "第二天",
+                "created_at": "2020-01-03T10:00:00+08:00",
+            },
+        ])
+        dividers = chat.findChildren(QLabel, "dateDivider")
+        self.assertEqual(len(dividers), 2)
+        self.assertEqual(dividers[0].text(), "2020年01月02日")
         chat.close()
 
     def test_streaming_updates_one_row_and_keeps_scroll_at_bottom(self):

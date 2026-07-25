@@ -101,7 +101,10 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 
 - 支持 OpenAI-compatible Chat Completions 与流式回复。
 - 支持模型 Tool Calls。
-- 内置查看时间、系统信息和打开白名单系统应用等安全工具。
+- 内置安全算式、时间、系统与磁盘信息、HTTP(S) 网页和白名单应用等工具。
+- 每个角色拥有独立的本地会话与上下文，切换角色不会丢失原角色记录。
+- “聊天时光胶囊”支持按角色、按日期查看，并导出 Markdown 或 JSON。
+- 支持开启新话题而保留旧记录，以及清空本次、所选日期或全部历史。
 - 角色包内的 `system_prompt` 可定义名字、语气和人格。
 
 ## 开播监听
@@ -118,6 +121,7 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 ## 隐私与兼容
 
 - 角色包、设置、日志保存在 `%LOCALAPPDATA%\Pixkin`。
+- 聊天历史保存在本机 `%LOCALAPPDATA%\Pixkin\chat-history.sqlite3`，不会自动上传。
 - 老版 `%LOCALAPPDATA%\DesktopPet` 数据会在首次运行时迁移。
 - API Key 优先保存在 Windows Credential Manager。
 - 新增会删除文件、发送消息或修改系统的工具时，应增加逐次确认与审计记录。
