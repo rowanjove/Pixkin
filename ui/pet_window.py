@@ -136,11 +136,11 @@ class PetWindow(QWidget):
         painter.scale(scale, scale)
 
         if self.character_package:
-            if self.is_docked and self._is_edge_state():
+            if self._should_draw_edge_art():
                 self._draw_package_peek(painter)
             else:
                 self._draw_package_character(painter)
-        elif self.is_docked and self._is_edge_state():
+        elif self._should_draw_edge_art():
             self._draw_peek(painter)
         else:
             self._draw_character(painter)
@@ -193,6 +193,10 @@ class PetWindow(QWidget):
     def _is_edge_state(self):
         value = self.animator.current_state.value
         return value == "edge_docked" or value.startswith("edge_")
+
+    def _should_draw_edge_art(self):
+        """Keep edge art active through undocking until its side is cleared."""
+        return bool(self.dock_side and self._is_edge_state())
 
     @staticmethod
     def _edge_state_for(side: str, phase: str):
