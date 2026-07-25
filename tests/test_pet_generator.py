@@ -199,6 +199,15 @@ class PetGeneratorTests(unittest.TestCase):
             self.assertTrue(
                 Path(ready["artifacts"]["qa_report"]).is_file()
             )
+            self.assertTrue(
+                Path(
+                    ready["artifacts"]["animation_qa_report"]
+                ).is_file()
+            )
+            for preview in ready["artifacts"][
+                "animation_previews"
+            ].values():
+                self.assertTrue(Path(preview).is_file())
             for state in BASIC_POSE_IDS:
                 self.assertEqual(
                     ready["tasks"][state]["status"], "complete"
@@ -213,6 +222,14 @@ class PetGeneratorTests(unittest.TestCase):
             inspected = package_manager.inspect_zip(str(package_path))
             self.assertEqual(inspected.schema_version, "2.0")
             self.assertEqual(inspected.quality_tier, "basic")
+            for state in BASIC_POSE_IDS:
+                self.assertGreaterEqual(
+                    len(inspected.animations[state].frames), 4
+                )
+                self.assertTrue(all(
+                    "images/frames" in frame.file.as_posix()
+                    for frame in inspected.animations[state].frames
+                ))
 
             manifest_path = (
                 store.workspace(runs[0]["id"]) / "run.json"

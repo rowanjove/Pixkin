@@ -635,6 +635,44 @@ class UiSmokeTests(unittest.TestCase):
             manager.read_zip_preview.assert_not_called()
             lab.close()
 
+    def test_pet_lab_discovers_and_opens_animation_previews(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            store = PetGenerationRunStore(base / "runs")
+            run = store.create(
+                run_id="animation-preview",
+                request={"pet_name": "Nova"},
+                task_ids=["idle"],
+            )
+            preview = store.workspace(run["id"]) / "qa/idle.gif"
+            preview.parent.mkdir(parents=True)
+            Image.new("RGBA", (192, 208), (120, 70, 190, 255)).save(
+                preview, "GIF"
+            )
+            store.update_stage(
+                run["id"],
+                "final_review",
+                status="needs_review",
+                artifacts={
+                    "animation_previews": {"idle": str(preview)}
+                },
+            )
+            lab = PetLabWindow(
+                self.config, self.package_manager, run_store=store
+            )
+            lab.active_run_id = run["id"]
+
+            previews = lab._available_animation_previews()
+
+            self.assertEqual(previews, {"idle": preview})
+            with patch.object(
+                QDialog,
+                "exec",
+                return_value=QDialog.DialogCode.Rejected,
+            ):
+                lab._show_animation_previews(previews)
+            lab.close()
+
     def test_pet_lab_can_switch_to_an_archived_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

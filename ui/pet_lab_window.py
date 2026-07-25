@@ -3,7 +3,7 @@ import shutil
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QIcon, QPixmap
+from PyQt6.QtGui import QFont, QIcon, QMovie, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout,
@@ -778,7 +778,7 @@ class PetLabWindow(QDialog):
         )
         dialog.setDefaultButton(QMessageBox.StandardButton.No)
         self._set_package_preview(dialog, zip_path)
-        return dialog.exec() == QMessageBox.StandardButton.Yes
+        return self._exec_install_confirmation(dialog)
 
     def _confirm_replace(self, zip_path: str, inspected, existing) -> bool:
         dialog = QMessageBox(self)
@@ -796,7 +796,89 @@ class PetLabWindow(QDialog):
         )
         dialog.setDefaultButton(QMessageBox.StandardButton.No)
         self._set_package_preview(dialog, zip_path)
-        return dialog.exec() == QMessageBox.StandardButton.Yes
+        return self._exec_install_confirmation(dialog)
+
+    def _exec_install_confirmation(self, dialog) -> bool:
+        previews = self._available_animation_previews()
+        preview_button = None
+        if previews:
+            preview_button = dialog.addButton(
+                "查看动画预览", QMessageBox.ButtonRole.ActionRole
+            )
+        while True:
+            dialog.exec()
+            clicked = dialog.clickedButton()
+            if preview_button is not None and clicked is preview_button:
+                self._show_animation_previews(previews)
+                continue
+            return clicked is dialog.button(
+                QMessageBox.StandardButton.Yes
+            )
+
+    def _available_animation_previews(self):
+        if not self.active_run_id:
+            return {}
+        try:
+            record = self.run_store.load(self.active_run_id)
+        except PetGenerationRunError:
+            return {}
+        values = record["artifacts"].get("animation_previews", {})
+        if not isinstance(values, dict):
+            return {}
+        return {
+            str(state): Path(path)
+            for state, path in values.items()
+            if Path(path).is_file()
+        }
+
+    def _show_animation_previews(self, previews):
+        if not previews:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("动作循环预览")
+        dialog.setMinimumSize(400, 430)
+        layout = QVBoxLayout(dialog)
+        copy = QLabel(
+            "逐动作检查循环是否完整、角色是否抖动，以及脚底和尺寸是否漂移。"
+        )
+        copy.setObjectName("muted")
+        copy.setWordWrap(True)
+        layout.addWidget(copy)
+        state_input = QComboBox()
+        for state in previews:
+            state_input.addItem(state, state)
+        layout.addWidget(state_input)
+        canvas = QLabel()
+        canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        canvas.setMinimumSize(320, 330)
+        layout.addWidget(canvas, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close
+        )
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        active_movie = [None]
+
+        def play_selected():
+            if active_movie[0] is not None:
+                active_movie[0].stop()
+            state = state_input.currentData()
+            movie = QMovie(str(previews[state]))
+            movie.setScaledSize(QSize(288, 312))
+            canvas.setMovie(movie)
+            active_movie[0] = movie
+            movie.start()
+
+        state_input.currentIndexChanged.connect(play_selected)
+        play_selected()
+        dialog.exec()
+        if active_movie[0] is not None:
+            active_movie[0].stop()
+            canvas.clear()
+            active_movie[0].setFileName("")
+            active_movie[0].deleteLater()
+            active_movie[0] = None
+        dialog.deleteLater()
 
     def _set_package_preview(self, dialog, zip_path: str):
         if self.active_run_id:
@@ -1147,7 +1229,16 @@ class PetLabWindow(QDialog):
                 qa_report = Path(str(
                     record["artifacts"].get("qa_report", "")
                 ))
-                if package.is_file() and qa_report.is_file():
+                animation_qa_report = Path(str(
+                    record["artifacts"].get(
+                        "animation_qa_report", ""
+                    )
+                ))
+                if (
+                    package.is_file()
+                    and qa_report.is_file()
+                    and animation_qa_report.is_file()
+                ):
                     self.active_run_id = run_id
                     self._on_package_ready(str(package))
                     return
