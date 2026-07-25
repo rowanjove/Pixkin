@@ -13,7 +13,7 @@ from openai import OpenAI
 from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core.pet_animation_builder import PetAnimationBuilder
+from core.pet_animation_builder import LOOP_STATES, PetAnimationBuilder
 from core.pet_animation_qa import PetAnimationQa
 from core.pet_generation_run import PetGenerationRunStore
 from core.pet_generation_qa import PetGenerationQa
@@ -32,8 +32,40 @@ POSES = {
     "alerting": "excited celebratory hop pose; no detached effects",
 }
 
+STANDARD_POSES = {
+    **POSES,
+    "look_around": (
+        "curious neutral standing pose, eyes looking gently to one side"
+    ),
+    "wake": "freshly awake standing pose with a small alert stretch",
+    "listening": (
+        "attentive listening pose leaning forward slightly, mouth closed"
+    ),
+    "thinking": (
+        "thoughtful pose with one tiny paw near the chin; no symbols"
+    ),
+    "working": (
+        "focused ready-to-help pose, attentive eyes; no desk or props"
+    ),
+    "waiting": (
+        "patient relaxed waiting pose with a calm neutral expression"
+    ),
+    "success": (
+        "proud happy success pose with tiny paws raised; no effects"
+    ),
+    "failed": (
+        "gentle apologetic disappointed pose, still cute and reassuring"
+    ),
+    "touch": (
+        "delighted reaction to a friendly head pat, eyes softly closed"
+    ),
+    "happy": "bright joyful pose with a warm smile; no detached effects",
+}
+
 BASIC_POSE_IDS = ("idle", "talking", "dragging", "alerting")
+STANDARD_POSE_IDS = tuple(STANDARD_POSES)
 CORE_REVIEW_POSE_IDS = BASIC_POSE_IDS
+GENERATION_MODES = {"basic", "legacy_full", "standard"}
 
 HARD_CARTOON_RULES = """
 NON-NEGOTIABLE OUTPUT RULES — these override every reference and style note:
@@ -74,6 +106,7 @@ class PetGenerationWorker(QThread):
         style_notes: str,
         reference_paths,
         full_hatch: bool = True,
+        generation_mode: str = None,
         run_id: str = None,
         run_store: PetGenerationRunStore = None,
         retry_task_id: str = None,
@@ -87,7 +120,16 @@ class PetGenerationWorker(QThread):
         self.personality = personality.strip()
         self.style_notes = style_notes.strip()[:800]
         self.reference_paths = [Path(path) for path in reference_paths][:4]
-        self.full_hatch = full_hatch
+        self.generation_mode = (
+            str(generation_mode)
+            if generation_mode is not None
+            else ("legacy_full" if full_hatch else "basic")
+        )
+        if self.generation_mode not in GENERATION_MODES:
+            raise ValueError(
+                f"不支持的伙伴工坊生成模式：{self.generation_mode}"
+            )
+        self.full_hatch = self.generation_mode != "basic"
         self._client = None
         self.run_id = run_id
         self._run_store = run_store
@@ -106,6 +148,11 @@ class PetGenerationWorker(QThread):
         store = run_store or PetGenerationRunStore()
         record = store.load(run_id)
         request = record["request"]
+        stored_mode = str(request.get("mode", "draft"))
+        generation_mode = {
+            "draft": "basic",
+            "full": "legacy_full",
+        }.get(stored_mode, stored_mode)
         return cls(
             api_key=api_key,
             base_url=str(request.get("image_base_url", "")),
@@ -115,7 +162,8 @@ class PetGenerationWorker(QThread):
             personality=str(request.get("personality", "")),
             style_notes=str(request.get("style_notes", "")),
             reference_paths=request.get("reference_paths", []),
-            full_hatch=request.get("mode") == "full",
+            full_hatch=generation_mode != "basic",
+            generation_mode=generation_mode,
             run_id=run_id,
             run_store=store,
             retry_task_id=retry_task_id,
@@ -146,7 +194,7 @@ class PetGenerationWorker(QThread):
                         "reference_paths": [
                             str(path) for path in self.reference_paths
                         ],
-                        "mode": "full" if self.full_hatch else "draft",
+                        "mode": self.generation_mode,
                         "image_base_url": self.base_url,
                         "image_model": self.model,
                         "image_quality": self.quality,
@@ -505,7 +553,9 @@ class PetGenerationWorker(QThread):
                 self._client = None
 
     def _pose_items(self):
-        if self.full_hatch:
+        if self.generation_mode == "standard":
+            return list(STANDARD_POSES.items())
+        if self.generation_mode == "legacy_full":
             return list(POSES.items())
         return [(state, POSES[state]) for state in BASIC_POSE_IDS]
 
@@ -859,11 +909,7 @@ class PetGenerationWorker(QThread):
                     sequence.get(
                         "playback",
                         (
-                            "loop"
-                            if state in {
-                                "idle", "sleep", "talking", "dragging"
-                            }
-                            else "once"
+                            "loop" if state in LOOP_STATES else "once"
                         ),
                     )
                 ),
@@ -874,6 +920,15 @@ class PetGenerationWorker(QThread):
             self.personality
             or "聪明、温暖、友好，回答简洁而有帮助"
         )
+        generated_states = set(generated)
+        quality_tier = (
+            "standard"
+            if (
+                self.generation_mode == "standard"
+                and set(STANDARD_POSE_IDS).issubset(generated_states)
+            )
+            else "basic"
+        )
         metadata = {
             "schema_version": "2.0",
             "id": slug,
@@ -881,7 +936,7 @@ class PetGenerationWorker(QThread):
             "version": "2.0.0",
             "author": "Pixkin 伙伴工坊",
             "description": "由至少一张风格参考图孵化的卡通桌面伙伴。",
-            "quality_tier": "basic",
+            "quality_tier": quality_tier,
             "preview": "images/idle.png",
             "persona": {
                 "identity": (
@@ -920,8 +975,12 @@ class PetGenerationWorker(QThread):
                     state: weight
                     for state, weight in {
                         "blink": 5,
-                        "stretch": 1,
+                        "look_around": 2,
+                        "nod": 1,
+                        "stretch": 0.8,
                         "wave": 0.6,
+                        "sleep": 0.35,
+                        "happy": 0.35,
                     }.items()
                     if state in generated
                 },
@@ -951,6 +1010,7 @@ class PetGenerationWorker(QThread):
             "extensions": {
                 "pixkin_pet_lab": {
                     "animation_source": "procedural_micro_motion",
+                    "generation_mode": self.generation_mode,
                     "key_pose_canvas": [192, 208],
                     "anchor": [96, 194],
                 },

@@ -235,8 +235,12 @@ class PetLabWindow(QDialog):
         )
         self.style_input.setFixedHeight(66)
         self.mode_input = QComboBox()
-        self.mode_input.addItem("完整孵化 · 9 个动作姿态", True)
-        self.mode_input.addItem("基础孵化 · 4 个核心动作", False)
+        self.mode_input.addItem(
+            "基础孵化 · 4 状态 / 5 次生成", "basic"
+        )
+        self.mode_input.addItem(
+            "标准孵化 · 19 状态 / 20 次生成", "standard"
+        )
         form.addRow("角色名字", self.name_input)
         form.addRow("性格设定", self.personality_input)
         form.addRow("风格补充", self.style_input)
@@ -267,9 +271,13 @@ class PetLabWindow(QDialog):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.hide()
-        self.status = QLabel("完整孵化会进行 10 次图像生成；基础孵化会进行 5 次。")
+        self.status = QLabel()
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
+        self.mode_input.currentIndexChanged.connect(
+            self._update_mode_hint
+        )
+        self._update_mode_hint()
         layout.addWidget(self.progress)
         layout.addWidget(self.status)
 
@@ -396,7 +404,8 @@ class PetLabWindow(QDialog):
             personality=self.personality_input.text().strip(),
             style_notes=self.style_input.toPlainText().strip(),
             reference_paths=self.reference_paths,
-            full_hatch=bool(self.mode_input.currentData()),
+            full_hatch=self.mode_input.currentData() != "basic",
+            generation_mode=self.mode_input.currentData(),
             run_store=self.run_store,
         )
         self._start_worker(worker)
@@ -422,6 +431,19 @@ class PetLabWindow(QDialog):
         self.progress.show()
         self.progress.setValue(0)
         worker.start()
+
+    def _update_mode_hint(self, _index=None):
+        mode = self.mode_input.currentData()
+        if mode == "standard":
+            self.status.setText(
+                "标准孵化包含 1 张身份稿和 19 个状态，共 20 次图像生成；"
+                "实际费用和耗时由所选接口、模型与质量决定。"
+            )
+        else:
+            self.status.setText(
+                "基础孵化包含 1 张身份稿和 4 个核心状态，共 5 次图像生成；"
+                "适合先验证角色身份与整体风格。"
+            )
 
     def _on_run_created(self, run_id: str):
         self.active_run_id = run_id

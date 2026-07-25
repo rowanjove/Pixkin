@@ -67,7 +67,16 @@ DEFAULT_PROFILE = {
     ),
 }
 
-LOOP_STATES = {"idle", "sleep", "talking", "dragging"}
+LOOP_STATES = {
+    "idle",
+    "sleep",
+    "talking",
+    "dragging",
+    "listening",
+    "thinking",
+    "working",
+    "waiting",
+}
 
 
 class PetAnimationBuilder:
