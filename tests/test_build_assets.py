@@ -89,26 +89,28 @@ class ReleaseAssetTests(unittest.TestCase):
                 for file in source["files"]:
                     self.assertIn(file, names)
 
-    def test_yeye_horizontal_edge_transitions_follow_window_motion(self):
-        text = (
-            ROOT / "character-packs" / "v2-built" / "yeye" / "character.md"
-        ).read_text(encoding="utf-8")
+    def test_yeye_horizontal_edge_art_faces_inward_and_joins_idle(self):
+        with zipfile.ZipFile(
+            ROOT / "character-packs" / "yeye.zip"
+        ) as archive:
+            text = archive.read("character.md").decode("utf-8")
         metadata = yaml.safe_load(text.split("---", 2)[1])
         animations = metadata["animations"]
 
-        # Enter runs while the window moves offscreen, so the art retracts.
-        # Exit runs while it moves onscreen, so the art emerges.
+        # The file names describe the art's occupied half. Screen-edge states
+        # therefore use the opposite file set so the character faces inward.
         for side in ("left", "right"):
-            prefix = f"images/edge/{side}-"
+            art_side = "right" if side == "left" else "left"
+            prefix = f"images/edge/{art_side}-"
             enter = animations[f"edge_enter_{side}"]["source"]["files"]
             exit_ = animations[f"edge_exit_{side}"]["source"]["files"]
             self.assertEqual(
                 enter,
-                [f"{prefix}{index:02d}.png" for index in range(3, -1, -1)],
+                [f"{prefix}{index:02d}.png" for index in range(4)],
             )
             self.assertEqual(
                 exit_,
-                [f"{prefix}{index:02d}.png" for index in range(4)],
+                [f"{prefix}{index:02d}.png" for index in range(3, -1, -1)],
             )
 
     def test_windows_powershell_build_script_has_utf8_bom(self):

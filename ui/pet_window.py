@@ -7,7 +7,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QPen, QPainterPath, QMouseEvent,
-    QRadialGradient, QLinearGradient, QPixmap
+    QRadialGradient, QLinearGradient, QPixmap, QRegion
 )
 
 from core.character_package import CharacterPackage
@@ -23,6 +23,7 @@ class PetWindow(QWidget):
     """透明桌面挂件：负责角色绘制、拖拽、单击对话与多屏贴边。"""
 
     DESIGN_SIZE = 180
+    DEDICATED_EDGE_REVEAL = 96
 
     def __init__(
         self,
@@ -45,6 +46,7 @@ class PetWindow(QWidget):
         self.character_package = None
         self._character_frames = {}
         self._dedicated_edge_states = set()
+        self._edge_subject_bounds = {}
         self._state_started_tick = 0
         self._roam_animation = None
         self._roam_state = None
@@ -145,6 +147,7 @@ class PetWindow(QWidget):
         self.character_package = package
         self._character_frames = {}
         self._dedicated_edge_states = set()
+        self._edge_subject_bounds = {}
         if package:
             source_cache = {}
             for state, animation in package.animations.items():
@@ -343,16 +346,31 @@ class PetWindow(QWidget):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        cache_key = frame.cacheKey()
+        subject = self._edge_subject_bounds.get(cache_key)
+        if subject is None:
+            subject = QRegion(scaled.mask()).boundingRect()
+            if subject.isEmpty():
+                subject = scaled.rect()
+            self._edge_subject_bounds[cache_key] = subject
         x = (self.DESIGN_SIZE - scaled.width()) // 2
         y = (self.DESIGN_SIZE - scaled.height()) // 2
         if self.dock_side == "left":
-            x = self.DESIGN_SIZE - scaled.width()
+            x = (
+                self.DESIGN_SIZE
+                - self.DEDICATED_EDGE_REVEAL
+                - subject.left()
+            )
         elif self.dock_side == "right":
-            x = 0
+            x = self.DEDICATED_EDGE_REVEAL - subject.right() - 1
         elif self.dock_side == "top":
-            y = self.DESIGN_SIZE - scaled.height()
+            y = (
+                self.DESIGN_SIZE
+                - self.DEDICATED_EDGE_REVEAL
+                - subject.top()
+            )
         elif self.dock_side == "bottom":
-            y = 0
+            y = self.DEDICATED_EDGE_REVEAL - subject.bottom() - 1
         painter.drawPixmap(x, y, scaled)
 
     def _draw_character(self, painter: QPainter):
@@ -630,7 +648,11 @@ class PetWindow(QWidget):
     def _dock_target(self, side, geo=None, reveal=None):
         geo = geo or self._screen_geometry()
         x, y, w, h = self.x(), self.y(), self.width(), self.height()
-        reveal = self.peek_size if reveal is None else int(reveal)
+        reveal = (
+            self._edge_reveal(side)
+            if reveal is None
+            else int(reveal)
+        )
         reveal = max(36, min(min(w, h), reveal))
         if side == "left":
             x = geo.left() - w + reveal
@@ -641,6 +663,15 @@ class PetWindow(QWidget):
         elif side == "bottom":
             y = geo.bottom() + 1 - reveal
         return int(x), int(y)
+
+    def _edge_reveal(self, side):
+        """Return enough screen space to show dedicated edge art uncropped."""
+        state = f"edge_idle_{side}"
+        if state in self._dedicated_edge_states:
+            scale = min(self.width(), self.height()) / self.DESIGN_SIZE
+            dedicated = round(self.DEDICATED_EDGE_REVEAL * scale)
+            return max(self.peek_size, dedicated)
+        return self.peek_size
 
     def _dock_to_side(self, side, *, geo=None):
         if not self._edge_side_enabled(side):
@@ -658,7 +689,11 @@ class PetWindow(QWidget):
             easing=QEasingCurve.Type.InOutSine,
             on_finished=lambda expected=side: self._finish_docking(expected),
         )
-        LOGGER.info("吸附到屏幕%s侧，露出%s像素", side, self.peek_size)
+        LOGGER.info(
+            "吸附到屏幕%s侧，露出%s像素",
+            side,
+            self._edge_reveal(side),
+        )
         return True
 
     def _finish_docking(self, expected_side):
@@ -752,7 +787,8 @@ class PetWindow(QWidget):
         )
         reveal = min(
             min(self.width(), self.height()),
-            self.peek_size + round(min(self.width(), self.height()) * 0.2),
+            self._edge_reveal(self.dock_side)
+            + round(min(self.width(), self.height()) * 0.2),
         )
         target_x, target_y = self._dock_target(
             self.dock_side, reveal=reveal

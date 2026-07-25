@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PyQt6.QtCore import Qt, QPointF, QEvent, QObject
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QRect
+from PyQt6.QtGui import QMouseEvent, QRegion
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QListWidget, QMessageBox
@@ -143,7 +143,45 @@ class UiSmokeTests(unittest.TestCase):
                 )
                 pet.show()
                 self.app.processEvents()
-                self.assertFalse(pet.grab().isNull())
+                rendered = pet.grab()
+                self.assertFalse(rendered.isNull())
+
+                reveal = pet._edge_reveal(side)
+                self.assertGreaterEqual(
+                    reveal,
+                    round(
+                        pet.DEDICATED_EDGE_REVEAL
+                        * pet.width()
+                        / pet.DESIGN_SIZE
+                    ),
+                )
+                if side == "left":
+                    visible = QRect(
+                        pet.width() - reveal, 0, reveal, pet.height()
+                    )
+                elif side == "right":
+                    visible = QRect(0, 0, reveal, pet.height())
+                elif side == "top":
+                    visible = QRect(
+                        0, pet.height() - reveal, pet.width(), reveal
+                    )
+                else:
+                    visible = QRect(0, 0, pet.width(), reveal)
+                subject = QRegion(rendered.mask()).boundingRect()
+                self.assertFalse(subject.isEmpty())
+                self.assertTrue(
+                    visible.contains(subject),
+                    f"{side} edge art would be cropped: "
+                    f"subject={subject}, visible={visible}",
+                )
+                if side == "left":
+                    self.assertEqual(subject.left(), visible.left())
+                elif side == "right":
+                    self.assertEqual(subject.right(), visible.right())
+                elif side == "top":
+                    self.assertEqual(subject.top(), visible.top())
+                else:
+                    self.assertEqual(subject.bottom(), visible.bottom())
 
             pet.close()
             pet.chat_window.close()
