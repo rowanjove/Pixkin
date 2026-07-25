@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QPointF, QEvent, QObject, QRect
 from PyQt6.QtGui import QMouseEvent, QRegion
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QListWidget, QMessageBox
+    QApplication, QDialog, QListWidget, QMessageBox, QPushButton
 )
 
 from core.character_package import (
@@ -233,6 +233,54 @@ class UiSmokeTests(unittest.TestCase):
         chat.close()
         settings.close()
         lab.close()
+
+    def test_settings_are_non_modal_single_instance_and_chat_stays_usable(self):
+        controller = DesktopPetApp.__new__(DesktopPetApp)
+        controller.config_mgr = self.config
+        controller.package_manager = self.package_manager
+        controller._settings_window = None
+        controller.pet_window = MagicMock()
+        controller._apply_tray_theme = MagicMock()
+        controller._restart_live_monitor = MagicMock()
+        controller.tray = MagicMock()
+        chat = ChatBubbleWindow(self.config)
+        chat.show()
+
+        settings = controller._open_settings()
+        self.app.processEvents()
+
+        self.assertTrue(settings.isVisible())
+        self.assertFalse(settings.isModal())
+        self.assertEqual(
+            settings.windowModality(),
+            Qt.WindowModality.NonModal,
+        )
+        self.assertIsNone(QApplication.activeModalWidget())
+        self.assertIs(controller._open_settings(), settings)
+
+        close_button = next(
+            button
+            for button in chat.findChildren(QPushButton)
+            if button.text() == "×"
+        )
+        QTest.mouseClick(close_button, Qt.MouseButton.LeftButton)
+        self.app.processEvents()
+        self.assertFalse(chat.isVisible())
+
+        settings.reject()
+        self.app.processEvents()
+        self.assertIsNone(controller._settings_window)
+
+        applied = controller._open_settings()
+        with patch("main.set_start_with_windows") as set_startup:
+            applied.accept()
+            self.app.processEvents()
+        controller.pet_window.apply_config.assert_called_once()
+        controller._apply_tray_theme.assert_called_once()
+        controller._restart_live_monitor.assert_called_once()
+        set_startup.assert_called_once()
+        self.assertIsNone(controller._settings_window)
+        chat.close()
 
     def test_pet_lab_mode_hint_discloses_generation_count(self):
         lab = PetLabWindow(self.config, self.package_manager)
