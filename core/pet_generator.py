@@ -12,6 +12,7 @@ from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.pet_generation_run import PetGenerationRunStore
+from core.version import VERSION
 
 
 POSES = {
@@ -25,6 +26,8 @@ POSES = {
     "talking": "engaged speaking expression with a small open mouth",
     "alerting": "excited celebratory hop pose; no detached effects",
 }
+
+BASIC_POSE_IDS = ("idle", "talking", "dragging", "alerting")
 
 HARD_CARTOON_RULES = """
 NON-NEGOTIABLE OUTPUT RULES — these override every reference and style note:
@@ -108,7 +111,9 @@ class PetGenerationWorker(QThread):
             if self.full_hatch:
                 pose_items = list(POSES.items())
             else:
-                pose_items = [("idle", POSES["idle"])]
+                pose_items = [
+                    (state, POSES[state]) for state in BASIC_POSE_IDS
+                ]
             self._run_store.create(
                 run_id=self.run_id,
                 request={
@@ -188,11 +193,6 @@ class PetGenerationWorker(QThread):
                     "complete",
                     artifact=f"images/{state}.png",
                 )
-
-            if not self.full_hatch:
-                idle = generated["idle"]
-                for state in POSES:
-                    generated[state] = idle
 
             self.progress_changed.emit(94, "正在组装 Pixkin 角色包…")
             self._run_store.update_stage(
@@ -307,49 +307,114 @@ class PetGenerationWorker(QThread):
         if not bbox:
             raise RuntimeError("生成图片没有检测到有效角色轮廓。")
         subject = rgba.crop(bbox)
-        side = max(subject.size)
-        padding = max(24, int(side * 0.12))
-        canvas = Image.new(
-            "RGBA", (side + padding * 2, side + padding * 2), (0, 0, 0, 0)
-        )
+        subject.thumbnail((168, 184), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (192, 208), (0, 0, 0, 0))
         canvas.alpha_composite(
             subject,
             (
                 (canvas.width - subject.width) // 2,
-                (canvas.height - subject.height) // 2,
+                194 - subject.height,
             ),
         )
-        canvas.thumbnail((512, 512), Image.Resampling.LANCZOS)
         canvas.save(target, "PNG", optimize=True)
 
     def _package(self, work: Path, slug: str, generated):
         animations = {
             state: {
-                "files": [f"images/{path.name}"],
+                "source": {
+                    "type": "frames",
+                    "files": [f"images/{path.name}"],
+                    "cell_size": [192, 208],
+                },
                 "fps": 8,
-                "loop": state in {"idle", "sleep", "talking", "alerting"},
+                "playback": (
+                    "loop"
+                    if state in {"idle", "sleep", "talking"}
+                    else "once"
+                ),
+                "anchor": [96, 194],
+                "interruptible": state != "dragging",
             }
             for state, path in generated.items()
         }
-        animations["edge_docked"] = {
-            "files": [f"images/{generated['idle'].name}"],
-            "fps": 8,
-            "loop": True,
-        }
-        prompt = (
-            f"你是 {self.pet_name}，Pixkin 桌面上的卡通 AI 伙伴。"
-            f"{self.personality or '你聪明、温暖、俏皮，回答简洁而有帮助。'}"
-            "你可以在必要时调用已启用的本地工具，并清楚说明工具执行结果。"
+        personality = (
+            self.personality
+            or "聪明、温暖、友好，回答简洁而有帮助"
         )
         metadata = {
+            "schema_version": "2.0",
             "id": slug,
             "name": self.pet_name,
-            "version": "1.0.0",
+            "version": "2.0.0",
             "author": "Pixkin 伙伴工坊",
             "description": "由至少一张风格参考图孵化的卡通桌面伙伴。",
+            "quality_tier": "basic",
             "preview": "images/idle.png",
-            "system_prompt": prompt,
+            "persona": {
+                "identity": (
+                    f"你是 {self.pet_name}，Pixkin 桌面上的卡通 AI 伙伴。"
+                ),
+                "core_traits": [personality],
+                "relationship": "陪伴用户学习、工作与日常生活的数字伙伴。",
+                "voice": {
+                    "tone": "自然、友好",
+                    "pacing": "清楚、不急促",
+                    "reply_length": "short",
+                    "vocabulary": "使用自然中文，避免机械套话",
+                },
+                "initiative": {
+                    "animate_without_prompt": True,
+                    "speak_without_prompt": False,
+                    "open_windows_without_prompt": False,
+                    "send_notifications_without_prompt": False,
+                },
+                "tool_behavior": {
+                    "before_call": "先说明为什么需要使用工具",
+                    "after_success": "只报告真实执行结果",
+                    "after_failure": "明确说明失败，不假装已经完成",
+                },
+                "boundaries": [
+                    "不主动发言、打开窗口或发送通知",
+                    "不替用户执行未经授权的敏感操作",
+                ],
+            },
+            "behavior": {
+                "motion_temperament": "balanced",
+                "speed_multiplier": 1.0,
+                "amplitude": "medium",
+                "idle_interval_seconds": [8, 16],
+                "ambient_weights": {
+                    state: weight
+                    for state, weight in {
+                        "blink": 5,
+                        "stretch": 1,
+                        "wave": 0.6,
+                    }.items()
+                    if state in generated
+                },
+                "cooldown_seconds": {
+                    "wave": 45,
+                    "stretch": 60,
+                },
+            },
             "animations": animations,
+            "compatibility": {
+                "min_app_version": VERSION,
+                "generated_by": f"Pixkin {VERSION}",
+            },
+            "rights": {
+                "license": "user-provided-references",
+                "author_confirmed_rights": False,
+                "ai_generated": True,
+                "reference_sources": [
+                    {
+                        "type": "user_provided",
+                        "description": "由用户提供给伙伴工坊的参考图片",
+                    }
+                ],
+                "modification_allowed": True,
+                "commercial_use_allowed": False,
+            },
         }
         frontmatter = yaml.safe_dump(
             metadata, allow_unicode=True, sort_keys=False
