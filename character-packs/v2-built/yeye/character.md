@@ -124,7 +124,7 @@ animations:
   edge_hover_left:
     source: {type: frames, files: ["images/edge/right-03.png", "images/edge/right-04.png", "images/edge/right-05.png", "images/edge/right-04.png"], cell_size: [192, 208]}
     fps: 7
-    playback: ping_pong
+    playback: once
     anchor: [96, 104]
   edge_exit_left:
     source: {type: frames, files: ["images/edge/right-03.png", "images/edge/right-02.png", "images/edge/right-01.png", "images/edge/right-00.png"], cell_size: [192, 208]}
@@ -144,7 +144,7 @@ animations:
   edge_hover_right:
     source: {type: frames, files: ["images/edge/left-03.png", "images/edge/left-04.png", "images/edge/left-05.png", "images/edge/left-04.png"], cell_size: [192, 208]}
     fps: 7
-    playback: ping_pong
+    playback: once
     anchor: [96, 104]
   edge_exit_right:
     source: {type: frames, files: ["images/edge/left-03.png", "images/edge/left-02.png", "images/edge/left-01.png", "images/edge/left-00.png"], cell_size: [192, 208]}
