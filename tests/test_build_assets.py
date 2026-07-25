@@ -89,6 +89,28 @@ class ReleaseAssetTests(unittest.TestCase):
                 for file in source["files"]:
                     self.assertIn(file, names)
 
+    def test_yeye_horizontal_edge_transitions_follow_window_motion(self):
+        text = (
+            ROOT / "character-packs" / "v2-built" / "yeye" / "character.md"
+        ).read_text(encoding="utf-8")
+        metadata = yaml.safe_load(text.split("---", 2)[1])
+        animations = metadata["animations"]
+
+        # Enter runs while the window moves offscreen, so the art retracts.
+        # Exit runs while it moves onscreen, so the art emerges.
+        for side in ("left", "right"):
+            prefix = f"images/edge/{side}-"
+            enter = animations[f"edge_enter_{side}"]["source"]["files"]
+            exit_ = animations[f"edge_exit_{side}"]["source"]["files"]
+            self.assertEqual(
+                enter,
+                [f"{prefix}{index:02d}.png" for index in range(3, -1, -1)],
+            )
+            self.assertEqual(
+                exit_,
+                [f"{prefix}{index:02d}.png" for index in range(4)],
+            )
+
     def test_windows_powershell_build_script_has_utf8_bom(self):
         content = (ROOT / "scripts" / "build_release.ps1").read_bytes()
         self.assertTrue(content.startswith(b"\xef\xbb\xbf"))

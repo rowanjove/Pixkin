@@ -112,7 +112,7 @@ animations:
   celebrate_live: *jump
 
   edge_enter_left:
-    source: {type: frames, files: ["images/edge/left-00.png", "images/edge/left-01.png", "images/edge/left-02.png", "images/edge/left-03.png"], cell_size: [192, 208]}
+    source: {type: frames, files: ["images/edge/left-03.png", "images/edge/left-02.png", "images/edge/left-01.png", "images/edge/left-00.png"], cell_size: [192, 208]}
     fps: 10
     playback: once
     anchor: [96, 104]
@@ -127,12 +127,12 @@ animations:
     playback: ping_pong
     anchor: [96, 104]
   edge_exit_left:
-    source: {type: frames, files: ["images/edge/left-03.png", "images/edge/left-02.png", "images/edge/left-01.png", "images/edge/left-00.png"], cell_size: [192, 208]}
+    source: {type: frames, files: ["images/edge/left-00.png", "images/edge/left-01.png", "images/edge/left-02.png", "images/edge/left-03.png"], cell_size: [192, 208]}
     fps: 10
     playback: once
     anchor: [96, 104]
   edge_enter_right:
-    source: {type: frames, files: ["images/edge/right-00.png", "images/edge/right-01.png", "images/edge/right-02.png", "images/edge/right-03.png"], cell_size: [192, 208]}
+    source: {type: frames, files: ["images/edge/right-03.png", "images/edge/right-02.png", "images/edge/right-01.png", "images/edge/right-00.png"], cell_size: [192, 208]}
     fps: 10
     playback: once
     anchor: [96, 104]
@@ -147,7 +147,7 @@ animations:
     playback: ping_pong
     anchor: [96, 104]
   edge_exit_right:
-    source: {type: frames, files: ["images/edge/right-03.png", "images/edge/right-02.png", "images/edge/right-01.png", "images/edge/right-00.png"], cell_size: [192, 208]}
+    source: {type: frames, files: ["images/edge/right-00.png", "images/edge/right-01.png", "images/edge/right-02.png", "images/edge/right-03.png"], cell_size: [192, 208]}
     fps: 10
     playback: once
     anchor: [96, 104]
