@@ -13,6 +13,7 @@ from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.pet_generation_run import PetGenerationRunStore
+from core.pet_generation_qa import PetGenerationQa
 from core.version import VERSION
 
 
@@ -29,6 +30,7 @@ POSES = {
 }
 
 BASIC_POSE_IDS = ("idle", "talking", "dragging", "alerting")
+CORE_REVIEW_POSE_IDS = BASIC_POSE_IDS
 
 HARD_CARTOON_RULES = """
 NON-NEGOTIABLE OUTPUT RULES — these override every reference and style note:
@@ -52,6 +54,8 @@ class PetGenerationWorker(QThread):
     progress_changed = pyqtSignal(int, str)
     run_created = pyqtSignal(str)
     review_ready = pyqtSignal(str, str)
+    core_review_ready = pyqtSignal(str, str, str)
+    qa_review_ready = pyqtSignal(str, str, str)
     package_ready = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
 
@@ -220,11 +224,49 @@ class PetGenerationWorker(QThread):
 
             if record.get("stage") == "final_review":
                 package = Path(str(record["artifacts"].get("package", "")))
-                if package.is_file():
+                qa_report = Path(str(
+                    record["artifacts"].get("qa_report", "")
+                ))
+                if package.is_file() and qa_report.is_file():
                     self.progress_changed.emit(
                         100, "角色包等待最终预览与安装确认。"
                     )
                     self.package_ready.emit(str(package))
+                    return
+            if record.get("stage") == "core_review":
+                core_review = record["reviews"].get("core_actions", {})
+                sheet = Path(str(
+                    record["artifacts"].get("core_contact_sheet", "")
+                ))
+                report = Path(str(
+                    record["artifacts"].get("core_qa_report", "")
+                ))
+                if (
+                    core_review.get("decision") != "accepted"
+                    and sheet.is_file()
+                    and report.is_file()
+                ):
+                    self.progress_changed.emit(
+                        55, "核心动作等待一致性审核。"
+                    )
+                    self.core_review_ready.emit(
+                        self.run_id, str(sheet), str(report)
+                    )
+                    return
+            if record.get("stage") == "qa_review":
+                sheet = Path(str(
+                    record["artifacts"].get("qa_contact_sheet", "")
+                ))
+                report = Path(str(
+                    record["artifacts"].get("qa_report", "")
+                ))
+                if sheet.is_file() and report.is_file():
+                    self.progress_changed.emit(
+                        94, "自动 QA 发现问题，请选择动作返工。"
+                    )
+                    self.qa_review_ready.emit(
+                        self.run_id, str(sheet), str(report)
+                    )
                     return
 
             self._validate_generation_inputs()
@@ -232,77 +274,119 @@ class PetGenerationWorker(QThread):
             self._run_store.update_stage(
                 self.run_id, "action_generation", status="running"
             )
-            generated = {}
+            generated = self._completed_images(images_dir, pose_items)
             total = len(pose_items)
-            for index, (state, pose) in enumerate(pose_items, start=1):
-                record = self._run_store.load(self.run_id)
-                task = record["tasks"][state]
-                target = images_dir / f"{state}.png"
-                if (
-                    self.retry_task_id not in {None, state}
-                    or (
-                        task["status"] == "complete"
-                        and target.is_file()
-                        and self.retry_task_id != state
-                    )
-                ):
-                    if task["status"] == "complete" and target.is_file():
-                        generated[state] = target
-                    continue
-                if self.retry_task_id == state:
-                    self._run_store.reset_task(self.run_id, state)
-                if self.isInterruptionRequested():
-                    self._mark_canceled()
-                    return
-                percent = 10 + int(index / total * 80)
-                self.progress_changed.emit(
-                    percent, f"正在绘制 {state} 姿态（{index}/{total}）…"
-                )
-                self._run_store.update_task(
-                    self.run_id,
-                    state,
-                    "running",
-                    increment_attempt=True,
-                )
-                self._active_task_id = state
-                inputs = [canonical, *self.reference_paths]
-                pose_bytes = self._generate(
-                    client, inputs, self._pose_prompt(pose)
-                )
-                self._save_sprite(pose_bytes, target)
-                generated[state] = target
-                self._run_store.update_task(
-                    self.run_id,
-                    state,
-                    "complete",
-                    artifact=f"images/{state}.png",
-                )
-                self._active_task_id = None
+            core_items = [
+                item for item in pose_items
+                if item[0] in CORE_REVIEW_POSE_IDS
+            ]
+            remaining_items = [
+                item for item in pose_items
+                if item[0] not in CORE_REVIEW_POSE_IDS
+            ]
+            self._generate_pose_group(
+                client=client,
+                canonical=canonical,
+                images_dir=images_dir,
+                pose_items=core_items,
+                generated=generated,
+                all_pose_items=pose_items,
+            )
+            if self.isInterruptionRequested():
+                self._mark_canceled()
+                return
+            incomplete_core = self._incomplete_states(
+                images_dir, core_items
+            )
+            if incomplete_core:
+                self._pause_after_targeted_retry(incomplete_core)
+                return
 
             record = self._run_store.load(self.run_id)
-            incomplete = [
-                state
-                for state, _ in pose_items
-                if (
-                    record["tasks"][state]["status"] != "complete"
-                    or not (images_dir / f"{state}.png").is_file()
+            core_review = record["reviews"].get("core_actions", {})
+            if core_review.get("decision") != "accepted":
+                core_qa = PetGenerationQa().run(
+                    images=generated,
+                    expected_states=[
+                        state for state, _ in core_items
+                    ],
+                    output_dir=work / "qa" / "core",
+                    canonical=canonical,
                 )
-            ]
+                self._run_store.update_stage(
+                    self.run_id,
+                    "core_review",
+                    status="needs_review",
+                    artifacts={
+                        "core_contact_sheet":
+                            core_qa["artifacts"]["contact_sheet"],
+                        "core_qa_report":
+                            core_qa["artifacts"]["report"],
+                    },
+                )
+                self.progress_changed.emit(
+                    55, "核心动作已生成，请检查身份与动作一致性。"
+                )
+                self.core_review_ready.emit(
+                    self.run_id,
+                    core_qa["artifacts"]["contact_sheet"],
+                    core_qa["artifacts"]["report"],
+                )
+                return
+
+            self._generate_pose_group(
+                client=client,
+                canonical=canonical,
+                images_dir=images_dir,
+                pose_items=remaining_items,
+                generated=generated,
+                all_pose_items=pose_items,
+            )
+            if self.isInterruptionRequested():
+                self._mark_canceled()
+                return
+            incomplete = self._incomplete_states(images_dir, pose_items)
             if incomplete:
-                if self.retry_task_id:
-                    self._run_store.update_stage(
-                        self.run_id,
-                        "action_generation",
-                        status="pending",
-                    )
-                    self.progress_changed.emit(
-                        85,
-                        "选中动作已重试；其余未完成动作可继续生成。",
-                    )
-                    return
-                raise RuntimeError(
-                    "仍有动作尚未完成：" + "、".join(incomplete)
+                self._pause_after_targeted_retry(incomplete)
+                return
+
+            self.progress_changed.emit(92, "正在执行自动 QA…")
+            qa_report = PetGenerationQa().run(
+                images=generated,
+                expected_states=[state for state, _ in pose_items],
+                output_dir=work / "qa" / "final",
+                canonical=canonical,
+            )
+            if not qa_report["passed"]:
+                self._run_store.update_stage(
+                    self.run_id,
+                    "qa_review",
+                    status="needs_review",
+                    artifacts={
+                        "qa_contact_sheet":
+                            qa_report["artifacts"]["contact_sheet"],
+                        "qa_report": qa_report["artifacts"]["report"],
+                    },
                 )
+                self.progress_changed.emit(
+                    94, "自动 QA 发现问题，请选择动作返工。"
+                )
+                self.qa_review_ready.emit(
+                    self.run_id,
+                    qa_report["artifacts"]["contact_sheet"],
+                    qa_report["artifacts"]["report"],
+                )
+                return
+            self._run_store.update_stage(
+                self.run_id,
+                "qa_complete",
+                status="running",
+                artifacts={
+                    "qa_contact_sheet":
+                        qa_report["artifacts"]["contact_sheet"],
+                    "qa_report": qa_report["artifacts"]["report"],
+                },
+            )
 
             self.progress_changed.emit(94, "正在组装 Pixkin 角色包…")
             self._run_store.update_stage(
@@ -354,6 +438,102 @@ class PetGenerationWorker(QThread):
         if self.full_hatch:
             return list(POSES.items())
         return [(state, POSES[state]) for state in BASIC_POSE_IDS]
+
+    def _completed_images(self, images_dir, pose_items):
+        record = self._run_store.load(self.run_id)
+        completed = {}
+        for state, _ in pose_items:
+            path = images_dir / f"{state}.png"
+            if (
+                record["tasks"][state]["status"] == "complete"
+                and path.is_file()
+            ):
+                completed[state] = path
+        return completed
+
+    def _generate_pose_group(
+        self,
+        *,
+        client,
+        canonical,
+        images_dir,
+        pose_items,
+        generated,
+        all_pose_items,
+    ):
+        positions = {
+            state: index
+            for index, (state, _) in enumerate(all_pose_items, start=1)
+        }
+        total = len(all_pose_items)
+        for state, pose in pose_items:
+            record = self._run_store.load(self.run_id)
+            task = record["tasks"][state]
+            target = images_dir / f"{state}.png"
+            if self.retry_task_id not in {None, state}:
+                continue
+            if (
+                task["status"] == "complete"
+                and target.is_file()
+                and self.retry_task_id != state
+            ):
+                generated[state] = target
+                continue
+            if self.retry_task_id == state:
+                self._run_store.reset_task(self.run_id, state)
+            if self.isInterruptionRequested():
+                return
+            index = positions[state]
+            percent = 10 + int(index / total * 80)
+            self.progress_changed.emit(
+                percent, f"正在绘制 {state} 姿态（{index}/{total}）…"
+            )
+            self._run_store.update_task(
+                self.run_id,
+                state,
+                "running",
+                increment_attempt=True,
+            )
+            self._active_task_id = state
+            pose_bytes = self._generate(
+                client,
+                [canonical, *self.reference_paths],
+                self._pose_prompt(pose),
+            )
+            self._save_sprite(pose_bytes, target)
+            generated[state] = target
+            self._run_store.update_task(
+                self.run_id,
+                state,
+                "complete",
+                artifact=f"images/{state}.png",
+            )
+            self._active_task_id = None
+
+    def _incomplete_states(self, images_dir, pose_items):
+        record = self._run_store.load(self.run_id)
+        return [
+            state
+            for state, _ in pose_items
+            if (
+                record["tasks"][state]["status"] != "complete"
+                or not (images_dir / f"{state}.png").is_file()
+            )
+        ]
+
+    def _pause_after_targeted_retry(self, incomplete):
+        if not self.retry_task_id:
+            raise RuntimeError(
+                "仍有动作尚未完成：" + "、".join(incomplete)
+            )
+        self._run_store.update_stage(
+            self.run_id,
+            "action_generation",
+            status="pending",
+        )
+        self.progress_changed.emit(
+            85, "选中动作已重试；其余未完成动作可继续生成。"
+        )
 
     def _validate_generation_inputs(self):
         if not self.api_key:

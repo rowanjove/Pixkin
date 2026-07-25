@@ -1,10 +1,11 @@
+import json
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QInputDialog,
     QProgressBar, QPushButton, QTextEdit, QVBoxLayout,
 )
 
@@ -394,6 +395,8 @@ class PetLabWindow(QDialog):
         worker.progress_changed.connect(self._on_progress)
         worker.run_created.connect(self._on_run_created)
         worker.review_ready.connect(self._on_review_ready)
+        worker.core_review_ready.connect(self._on_core_review_ready)
+        worker.qa_review_ready.connect(self._on_qa_review_ready)
         worker.error_occurred.connect(self._on_error)
         worker.package_ready.connect(self._on_package_ready)
         worker.finished.connect(
@@ -480,6 +483,174 @@ class PetLabWindow(QDialog):
             return "deferred"
         return "deferred"
 
+    def _on_core_review_ready(
+        self,
+        run_id: str,
+        sheet_path: str,
+        report_path: str,
+    ):
+        self.active_run_id = run_id
+        result = self._confirm_action_review(
+            title="审核核心动作一致性",
+            sheet_path=sheet_path,
+            report_path=report_path,
+            allow_accept=True,
+        )
+        if result[0] == "accepted":
+            self.run_store.record_review(
+                run_id, "core_actions", "accepted"
+            )
+            self.run_store.update_stage(
+                run_id, "action_generation", status="pending"
+            )
+            self._resume_run(run_id)
+        elif result[0] == "retry" and result[1]:
+            task_id = result[1]
+            self.run_store.record_review(
+                run_id,
+                "core_actions",
+                "rejected",
+                note=f"retry:{task_id}",
+            )
+            self.run_store.reset_task(run_id, task_id)
+            self.run_store.update_stage(
+                run_id, "action_generation", status="pending"
+            )
+            self._resume_run(run_id, retry_task_id=task_id)
+        else:
+            self.run_store.record_review(
+                run_id, "core_actions", "deferred"
+            )
+            self.status.setText(
+                "核心动作审核已暂存，可从未完成任务继续。"
+            )
+            self._refresh_runs(run_id)
+
+    def _on_qa_review_ready(
+        self,
+        run_id: str,
+        sheet_path: str,
+        report_path: str,
+    ):
+        self.active_run_id = run_id
+        result = self._confirm_action_review(
+            title="自动 QA 需要返工",
+            sheet_path=sheet_path,
+            report_path=report_path,
+            allow_accept=False,
+        )
+        if result[0] == "retry" and result[1]:
+            task_id = result[1]
+            self.run_store.record_review(
+                run_id,
+                "automatic_qa",
+                "rejected",
+                note=f"retry:{task_id}",
+            )
+            self.run_store.reset_task(run_id, task_id)
+            self.run_store.update_stage(
+                run_id, "action_generation", status="pending"
+            )
+            self._resume_run(run_id, retry_task_id=task_id)
+        else:
+            self.run_store.record_review(
+                run_id, "automatic_qa", "deferred"
+            )
+            self.status.setText(
+                "QA 报告和接触表已保留，可稍后选择动作返工。"
+            )
+            self._refresh_runs(run_id)
+
+    def _confirm_action_review(
+        self,
+        *,
+        title: str,
+        sheet_path: str,
+        report_path: str,
+        allow_accept: bool,
+    ):
+        try:
+            report = json.loads(
+                Path(report_path).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            self._on_error(f"QA 报告无法读取：{exc}")
+            return "deferred", None
+
+        summary = report.get("summary", {})
+        error_count = int(summary.get("errors", 0))
+        warning_count = int(summary.get("warnings", 0))
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText(
+            f"自动检查：{error_count} 个错误，{warning_count} 个提醒。"
+        )
+        messages = [
+            str(issue.get("message", ""))
+            for issue in [
+                *report.get("errors", []),
+                *report.get("warnings", []),
+            ][:5]
+        ]
+        dialog.setInformativeText(
+            "\n".join(messages)
+            or "请对照身份稿检查轮廓、配色、配饰和动作语义。"
+        )
+        accept = None
+        if allow_accept and not error_count:
+            accept = dialog.addButton(
+                "一致，继续", QMessageBox.ButtonRole.AcceptRole
+            )
+        retry = dialog.addButton(
+            "选择动作返工", QMessageBox.ButtonRole.DestructiveRole
+        )
+        later = dialog.addButton(
+            "稍后处理", QMessageBox.ButtonRole.RejectRole
+        )
+        pixmap = QPixmap(sheet_path)
+        if not pixmap.isNull():
+            dialog.setIconPixmap(pixmap.scaled(
+                420,
+                300,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if accept is not None and clicked is accept:
+            return "accepted", None
+        if clicked is not retry:
+            return "deferred", None
+
+        candidates = self._qa_retry_candidates(report)
+        if not candidates:
+            return "deferred", None
+        selected, confirmed = QInputDialog.getItem(
+            self,
+            "选择返工动作",
+            "只重新生成这个动作：",
+            candidates,
+            0,
+            False,
+        )
+        if not confirmed:
+            return "deferred", None
+        return "retry", selected
+
+    @staticmethod
+    def _qa_retry_candidates(report):
+        candidates = []
+        for issue in report.get("errors", []):
+            states = issue.get("states") or [issue.get("state")]
+            for state in states:
+                if state and state != "canonical" and state not in candidates:
+                    candidates.append(str(state))
+        for state in report.get("expected_states", []):
+            if state not in candidates:
+                candidates.append(str(state))
+        return candidates
+
     def _on_package_ready(self, zip_path: str):
         try:
             inspected = self.package_manager.inspect_zip(zip_path)
@@ -563,6 +734,23 @@ class PetLabWindow(QDialog):
         return dialog.exec() == QMessageBox.StandardButton.Yes
 
     def _set_package_preview(self, dialog, zip_path: str):
+        if self.active_run_id:
+            try:
+                record = self.run_store.load(self.active_run_id)
+                sheet = Path(str(
+                    record["artifacts"].get("qa_contact_sheet", "")
+                ))
+                preview = QPixmap(str(sheet))
+                if sheet.is_file() and not preview.isNull():
+                    dialog.setIconPixmap(preview.scaled(
+                        420,
+                        300,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    ))
+                    return
+            except PetGenerationRunError:
+                pass
         try:
             raw = self.package_manager.read_zip_preview(zip_path)
             preview = QPixmap()
@@ -596,7 +784,9 @@ class PetLabWindow(QDialog):
         ]
         stage_labels = {
             "canonical_review": "身份待确认",
+            "core_review": "核心动作待确认",
             "action_generation": "动作生成",
+            "qa_review": "QA 待返工",
             "final_review": "待安装",
             "failed": "失败",
             "canceled": "已取消",
@@ -658,9 +848,36 @@ class PetLabWindow(QDialog):
             ):
                 self._on_review_ready(run_id, str(canonical))
                 return
+            if record.get("stage") == "core_review":
+                sheet = Path(str(
+                    record["artifacts"].get("core_contact_sheet", "")
+                ))
+                report = Path(str(
+                    record["artifacts"].get("core_qa_report", "")
+                ))
+                if sheet.is_file() and report.is_file():
+                    self._on_core_review_ready(
+                        run_id, str(sheet), str(report)
+                    )
+                    return
+            if record.get("stage") == "qa_review":
+                sheet = Path(str(
+                    record["artifacts"].get("qa_contact_sheet", "")
+                ))
+                report = Path(str(
+                    record["artifacts"].get("qa_report", "")
+                ))
+                if sheet.is_file() and report.is_file():
+                    self._on_qa_review_ready(
+                        run_id, str(sheet), str(report)
+                    )
+                    return
             if record.get("stage") == "final_review":
                 package = Path(str(record["artifacts"].get("package", "")))
-                if package.is_file():
+                qa_report = Path(str(
+                    record["artifacts"].get("qa_report", "")
+                ))
+                if package.is_file() and qa_report.is_file():
                     self.active_run_id = run_id
                     self._on_package_ready(str(package))
                     return

@@ -1,3 +1,5 @@
+import io
+import json
 import tempfile
 import unittest
 import zipfile
@@ -5,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from core.character_package import CharacterPackageManager
 from core.config import ConfigManager
@@ -19,6 +21,25 @@ from core.pet_generator import (
 
 
 class PetGeneratorTests(unittest.TestCase):
+    @staticmethod
+    def _generated_sprite_bytes(index):
+        image = Image.new("RGB", (512, 512), (0, 255, 0))
+        color = (
+            90 + index * 25,
+            35 + index * 7,
+            170 - index * 12,
+        )
+        ImageDraw.Draw(image).rounded_rectangle(
+            (150, 90, 362, 430),
+            radius=70,
+            fill=color,
+            outline=(30, 35, 55),
+            width=14,
+        )
+        output = io.BytesIO()
+        image.save(output, "PNG")
+        return output.getvalue()
+
     def _worker(self, reference):
         return PetGenerationWorker(
             api_key="test",
@@ -141,14 +162,42 @@ class PetGeneratorTests(unittest.TestCase):
                 patch.object(
                     resumed,
                     "_generate",
-                    return_value=reference.read_bytes(),
+                    side_effect=[
+                        self._generated_sprite_bytes(index)
+                        for index in range(len(BASIC_POSE_IDS))
+                    ],
                 ),
             ):
                 resumed.run()
 
+            core_review = store.load(runs[0]["id"])
+            self.assertEqual(core_review["status"], "needs_review")
+            self.assertEqual(core_review["stage"], "core_review")
+            self.assertTrue(
+                Path(
+                    core_review["artifacts"]["core_contact_sheet"]
+                ).is_file()
+            )
+            self.assertTrue(
+                Path(core_review["artifacts"]["core_qa_report"]).is_file()
+            )
+            store.record_review(
+                runs[0]["id"], "core_actions", "accepted"
+            )
+            finalized = PetGenerationWorker.resume_from(
+                run_id=runs[0]["id"],
+                api_key="test",
+                run_store=store,
+            )
+            with patch("core.pet_generator.OpenAI"):
+                finalized.run()
+
             ready = store.load(runs[0]["id"])
             self.assertEqual(ready["status"], "needs_review")
             self.assertEqual(ready["stage"], "final_review")
+            self.assertTrue(
+                Path(ready["artifacts"]["qa_report"]).is_file()
+            )
             for state in BASIC_POSE_IDS:
                 self.assertEqual(
                     ready["tasks"][state]["status"], "complete"
@@ -163,6 +212,39 @@ class PetGeneratorTests(unittest.TestCase):
             inspected = package_manager.inspect_zip(str(package_path))
             self.assertEqual(inspected.schema_version, "2.0")
             self.assertEqual(inspected.quality_tier, "basic")
+
+            manifest_path = (
+                store.workspace(runs[0]["id"]) / "run.json"
+            )
+            legacy = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            legacy["reviews"].pop("core_actions", None)
+            legacy["artifacts"].pop("qa_report", None)
+            legacy["artifacts"].pop("qa_contact_sheet", None)
+            manifest_path.write_text(
+                json.dumps(legacy, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            migrated = PetGenerationWorker.resume_from(
+                run_id=runs[0]["id"],
+                api_key="test",
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    migrated,
+                    "_generate",
+                    side_effect=AssertionError(
+                        "completed images must be reused"
+                    ),
+                ),
+            ):
+                migrated.run()
+            self.assertEqual(
+                store.load(runs[0]["id"])["stage"], "core_review"
+            )
 
     def test_retrying_one_failed_action_does_not_redraw_completed_work(self):
         root = Path(__file__).resolve().parents[1]
@@ -234,6 +316,52 @@ class PetGeneratorTests(unittest.TestCase):
             self.assertEqual(record["tasks"]["idle"]["status"], "complete")
             self.assertEqual(record["tasks"]["idle"]["attempts"], 2)
             self.assertEqual(record["tasks"]["talking"]["status"], "pending")
+
+    def test_full_hatch_pauses_after_core_actions_before_remaining_poses(self):
+        root = Path(__file__).resolve().parents[1]
+        reference = root / "assets" / "pixkin" / "pip-avatar.png"
+        with tempfile.TemporaryDirectory() as directory:
+            store = PetGenerationRunStore(Path(directory) / "runs")
+            worker = self._worker(reference)
+            worker._run_store = store
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    worker,
+                    "_generate",
+                    return_value=reference.read_bytes(),
+                ),
+            ):
+                worker.run()
+            run = store.list_runs()[0]
+            store.record_review(run["id"], "canonical", "accepted")
+
+            resumed = PetGenerationWorker.resume_from(
+                run_id=run["id"],
+                api_key="test",
+                run_store=store,
+            )
+            with (
+                patch("core.pet_generator.OpenAI"),
+                patch.object(
+                    resumed,
+                    "_generate",
+                    side_effect=[
+                        self._generated_sprite_bytes(index)
+                        for index in range(len(BASIC_POSE_IDS))
+                    ],
+                ) as generate,
+            ):
+                resumed.run()
+
+            review = store.load(run["id"])
+            self.assertEqual(generate.call_count, len(BASIC_POSE_IDS))
+            self.assertEqual(review["stage"], "core_review")
+            for state in BASIC_POSE_IDS:
+                self.assertEqual(
+                    review["tasks"][state]["status"], "complete"
+                )
+            self.assertEqual(review["tasks"]["blink"]["status"], "pending")
 
 
 if __name__ == "__main__":
