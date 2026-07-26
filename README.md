@@ -226,6 +226,7 @@ release/
 ├─ Pixkin-Portable-1.3.0.exe
 ├─ Pixkin-Setup-1.3.0.exe
 ├─ update-stable.json（正式 Release）
+├─ shanshan.zip、linlin.zip、pip.zip
 ├─ 椰子.zip
 ├─ CHARACTER_PACKAGE_SPEC.md
 ├─ SBOM.cdx.json

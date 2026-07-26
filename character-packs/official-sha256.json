@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "archives": {
-    "shanshan.zip": "a3aa31ee6671d5827f7b0029f139fd71801286f3ccbeb657d57872c58dd97553",
-    "linlin.zip": "2a3430ee21bc7531523be54a95b2c3c5b646059a483ceb150d19da979d01688e",
-    "pip.zip": "f585f5d66260a3defe72d7a6a258ab61fcf687aa1eec5d2a43227a00bb2fa541",
-    "yeye.zip": "8c24ff3c502464f6fadff44614f558e12c4f8c29974b3e617d93c2d113683490"
+    "shanshan.zip": "12a0437d89997bfa6e0304720e9dbe6300c1ea897785c0ff5353423c92b862b0",
+    "linlin.zip": "a2650b614bace7761c35718fe0ccbaea9f2b7d2d48d6619f63f30f2ff358a383",
+    "pip.zip": "ca1fd8578b23ffb135e952fdaaf957f34bef42e9dfda025c9cb44b88dcd1e8b5",
+    "yeye.zip": "d212dc9ba7f0d52d3c068aebd7e72074355e84da9d41848193231590c464d186"
   }
 }
