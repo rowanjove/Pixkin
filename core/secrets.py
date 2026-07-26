@@ -4,6 +4,7 @@ import logging
 LOGGER = logging.getLogger("desktop_pet.secrets")
 CHAT_TARGET = "Pixkin/ChatAPI"
 IMAGE_TARGET = "Pixkin/ImageAPI"
+VOICE_TARGET = "Pixkin/VoiceAPI"
 LEGACY_TARGET = "DesktopPet/OpenAICompatibleAPI"
 
 
@@ -107,3 +108,11 @@ class SecretStore:
     @classmethod
     def set_image_api_key(cls, value: str) -> bool:
         return cls._write(IMAGE_TARGET, value, "Pixkin 伙伴工坊图像模型 API Key")
+
+    @classmethod
+    def get_voice_api_key(cls) -> str:
+        return cls._read(VOICE_TARGET)
+
+    @classmethod
+    def set_voice_api_key(cls, value: str) -> bool:
+        return cls._write(VOICE_TARGET, value, "Pixkin 语音转写 API Key")

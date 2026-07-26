@@ -146,13 +146,231 @@ class CharacterPackage:
             return True
 
 
+class _CharacterPackageTransactions:
+    """Own mutable install, rename, delete, and archive comparison operations."""
+
+    def __init__(self, manager):
+        self.manager = manager
+
+    def import_zip(
+        self,
+        zip_path: str,
+        replace: bool = False,
+        activate: bool = True,
+        allow_builtin_replace: bool = False,
+    ) -> CharacterPackage:
+        manager = self.manager
+        path = Path(zip_path)
+        metadata, prefix = manager._read_zip_metadata(path)
+        package_id = manager._validated_id(metadata.get("id", ""))
+        target = manager.root / package_id
+        if target.exists() and not replace:
+            raise CharacterPackageError(
+                f"角色包“{package_id}”已经安装，请先更换包 ID 或选择覆盖导入。"
+            )
+        if (
+            target.exists()
+            and replace
+            and package_id in BUILTIN_PACKAGE_IDS
+            and not allow_builtin_replace
+        ):
+            raise CharacterPackageError("内置角色不能被第三方角色包覆盖。")
+
+        temp_dir = Path(
+            tempfile.mkdtemp(prefix=".import-", dir=manager.root)
+        )
+        staging = temp_dir / package_id
+        staging.mkdir()
+        backup = None
+        target_replaced = False
+        try:
+            with zipfile.ZipFile(path) as archive:
+                for info in archive.infolist():
+                    relative = manager._relative_member(
+                        info.filename,
+                        prefix,
+                    )
+                    if relative is None or info.is_dir():
+                        continue
+                    destination = staging / Path(*relative.parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with (
+                        archive.open(info) as source,
+                        destination.open("wb") as output,
+                    ):
+                        shutil.copyfileobj(source, output)
+
+            package = manager._load_from_directory(staging)
+            if target.exists():
+                backup = manager.root / f".backup-{package_id}"
+                if backup.exists():
+                    shutil.rmtree(backup)
+                target.replace(backup)
+            staging.replace(target)
+            target_replaced = True
+            package = manager._load_from_directory(target)
+            if activate:
+                manager.activate(package.package_id)
+            if backup and backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+            return package
+        except Exception:
+            if target_replaced and target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            if backup and backup.exists():
+                backup.replace(target)
+            raise
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def rename_package(
+        self,
+        package_id: str,
+        new_name: str,
+    ) -> CharacterPackage:
+        manager = self.manager
+        package_id = manager._validated_id(package_id)
+        if package_id in BUILTIN_PACKAGE_IDS:
+            raise CharacterPackageError("内置角色不可重命名。")
+        name = str(new_name or "").strip()
+        if not name:
+            raise CharacterPackageError("角色名字不能为空。")
+        if len(name) > 32:
+            raise CharacterPackageError("角色名字不能超过 32 个字符。")
+        package = manager._load_from_directory(manager.root / package_id)
+        md_path = package.root / "character.md"
+        text = md_path.read_text(encoding="utf-8-sig")
+        match = re.match(
+            r"^\s*---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)",
+            text,
+            re.S,
+        )
+        metadata = manager._parse_frontmatter(text)
+        old_name = str(metadata.get("name", ""))
+        metadata["name"] = name
+        if manager._schema_major(metadata) < 2:
+            prompt = str(metadata.get("system_prompt", ""))
+            if prompt and old_name:
+                metadata["system_prompt"] = prompt.replace(old_name, name)
+        body = text[match.end():] if match else ""
+        frontmatter = yaml.safe_dump(
+            metadata,
+            allow_unicode=True,
+            sort_keys=False,
+        ).rstrip()
+        updated = f"---\n{frontmatter}\n---\n\n{body.lstrip()}"
+        names = {
+            file.relative_to(package.root).as_posix()
+            for file in package.root.rglob("*")
+            if file.is_file()
+        }
+        manager._validate_metadata(metadata, names)
+        temporary = md_path.with_suffix(".md.tmp")
+        temporary.write_text(updated, encoding="utf-8")
+        temporary.replace(md_path)
+        renamed = manager._load_from_directory(package.root)
+        if manager.config.get("character", "active_pack", "") == package_id:
+            if not manager.config.update_section(
+                "pet",
+                {"system_prompt": renamed.system_prompt},
+            ):
+                temporary.write_text(text, encoding="utf-8")
+                temporary.replace(md_path)
+                raise CharacterPackageError(
+                    "角色名称未保存：配置文件无法写入。"
+                )
+        return renamed
+
+    def delete_package(
+        self,
+        package_id: str,
+    ) -> Optional[CharacterPackage]:
+        manager = self.manager
+        package_id = manager._validated_id(package_id)
+        if package_id in BUILTIN_PACKAGE_IDS:
+            raise CharacterPackageError("内置角色不可删除。")
+        target = manager.root / package_id
+        package = manager._load_from_directory(target)
+        active_id = manager.config.get("character", "active_pack", "")
+        fallback = None
+        if active_id == package.package_id:
+            default_dir = manager.root / DEFAULT_PACKAGE_ID
+            if not default_dir.is_dir():
+                raise CharacterPackageError(
+                    "缺少默认角色，无法删除当前角色。请先重新安装默认角色。"
+                )
+            fallback = manager.activate(DEFAULT_PACKAGE_ID)
+        shutil.rmtree(target)
+        return fallback
+
+    def package_matches_zip(self, package_id: str, zip_path: str) -> bool:
+        manager = self.manager
+        target = manager.root / manager._validated_id(package_id)
+        if not target.is_dir():
+            return False
+        path = Path(zip_path)
+        try:
+            metadata, prefix = manager._read_zip_metadata(path)
+            if manager._validated_id(metadata.get("id", "")) != package_id:
+                return False
+            with zipfile.ZipFile(path) as archive:
+                members = {
+                    relative.as_posix(): info
+                    for info in archive.infolist()
+                    if (
+                        (
+                            relative := manager._relative_member(
+                                info.filename,
+                                prefix,
+                            )
+                        )
+                        is not None
+                        and not info.is_dir()
+                    )
+                }
+                installed = {
+                    file.relative_to(target).as_posix(): file
+                    for file in target.rglob("*")
+                    if file.is_file()
+                }
+                if set(members) != set(installed):
+                    return False
+                for name, info in members.items():
+                    local = installed[name]
+                    if local.stat().st_size != info.file_size:
+                        return False
+                    with (
+                        archive.open(info) as source,
+                        local.open("rb") as disk,
+                    ):
+                        if self.stream_digest(source) != self.stream_digest(
+                            disk
+                        ):
+                            return False
+            return True
+        except (OSError, zipfile.BadZipFile, CharacterPackageError):
+            return False
+
+    @staticmethod
+    def stream_digest(stream) -> bytes:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        return digest.digest()
+
+
 class CharacterPackageManager:
     """安全导入、校验和激活 ZIP 角色包。"""
 
-    def __init__(self, config_manager: ConfigManager, root: Path = None):
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        root: Optional[Path] = None,
+    ):
         self.config = config_manager
         self.root = Path(root) if root else characters_dir()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._transactions = _CharacterPackageTransactions(self)
 
     def list_packages(self) -> List[CharacterPackage]:
         packages = []
@@ -217,174 +435,24 @@ class CharacterPackageManager:
         activate: bool = True,
         allow_builtin_replace: bool = False,
     ) -> CharacterPackage:
-        path = Path(zip_path)
-        metadata, prefix = self._read_zip_metadata(path)
-        package_id = self._validated_id(metadata.get("id", ""))
-        target = self.root / package_id
-        if target.exists() and not replace:
-            raise CharacterPackageError(
-                f"角色包“{package_id}”已经安装，请先更换包 ID 或选择覆盖导入。"
-            )
-        if (
-            target.exists()
-            and replace
-            and package_id in BUILTIN_PACKAGE_IDS
-            and not allow_builtin_replace
-        ):
-            raise CharacterPackageError(
-                "内置角色不能被第三方角色包覆盖。"
-            )
-
-        temp_dir = Path(tempfile.mkdtemp(prefix=".import-", dir=self.root))
-        staging = temp_dir / package_id
-        staging.mkdir()
-        backup = None
-        target_replaced = False
-        try:
-            with zipfile.ZipFile(path) as archive:
-                for info in archive.infolist():
-                    relative = self._relative_member(info.filename, prefix)
-                    if relative is None or info.is_dir():
-                        continue
-                    destination = staging / Path(*relative.parts)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(info) as source, destination.open("wb") as output:
-                        shutil.copyfileobj(source, output)
-
-            package = self._load_from_directory(staging)
-            if target.exists():
-                backup = self.root / f".backup-{package_id}"
-                if backup.exists():
-                    shutil.rmtree(backup)
-                target.replace(backup)
-            staging.replace(target)
-            target_replaced = True
-            package = self._load_from_directory(target)
-            if activate:
-                self.activate(package.package_id)
-            if backup and backup.exists():
-                shutil.rmtree(backup, ignore_errors=True)
-            return package
-        except Exception:
-            if target_replaced and target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            if backup and backup.exists():
-                backup.replace(target)
-            raise
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        return self._transactions.import_zip(
+            zip_path,
+            replace=replace,
+            activate=activate,
+            allow_builtin_replace=allow_builtin_replace,
+        )
 
     def rename_package(self, package_id: str, new_name: str) -> CharacterPackage:
         """只修改角色显示名，包 ID 和资源目录保持稳定。"""
-        package_id = self._validated_id(package_id)
-        if package_id in BUILTIN_PACKAGE_IDS:
-            raise CharacterPackageError("内置角色不可重命名。")
-        name = str(new_name or "").strip()
-        if not name:
-            raise CharacterPackageError("角色名字不能为空。")
-        if len(name) > 32:
-            raise CharacterPackageError("角色名字不能超过 32 个字符。")
-        package = self._load_from_directory(self.root / package_id)
-        md_path = package.root / "character.md"
-        text = md_path.read_text(encoding="utf-8-sig")
-        match = re.match(
-            r"^\s*---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)", text, re.S
-        )
-        metadata = self._parse_frontmatter(text)
-        old_name = str(metadata.get("name", ""))
-        metadata["name"] = name
-        if self._schema_major(metadata) < 2:
-            prompt = str(metadata.get("system_prompt", ""))
-            if prompt and old_name:
-                metadata["system_prompt"] = prompt.replace(old_name, name)
-        body = text[match.end():] if match else ""
-        frontmatter = yaml.safe_dump(
-            metadata, allow_unicode=True, sort_keys=False
-        ).rstrip()
-        updated = f"---\n{frontmatter}\n---\n\n{body.lstrip()}"
-        names = {
-            file.relative_to(package.root).as_posix()
-            for file in package.root.rglob("*")
-            if file.is_file()
-        }
-        self._validate_metadata(metadata, names)
-        temporary = md_path.with_suffix(".md.tmp")
-        temporary.write_text(updated, encoding="utf-8")
-        temporary.replace(md_path)
-        renamed = self._load_from_directory(package.root)
-        if self.config.get("character", "active_pack", "") == package_id:
-            if not self.config.update_section(
-                "pet", {"system_prompt": renamed.system_prompt}
-            ):
-                temporary.write_text(text, encoding="utf-8")
-                temporary.replace(md_path)
-                raise CharacterPackageError("角色名称未保存：配置文件无法写入。")
-        return renamed
+        return self._transactions.rename_package(package_id, new_name)
 
     def delete_package(self, package_id: str) -> Optional[CharacterPackage]:
         """删除自定义角色；删除当前角色前自动切回默认角色。"""
-        package_id = self._validated_id(package_id)
-        if package_id in BUILTIN_PACKAGE_IDS:
-            raise CharacterPackageError("内置角色不可删除。")
-        target = self.root / package_id
-        package = self._load_from_directory(target)
-        active_id = self.config.get("character", "active_pack", "")
-        fallback = None
-        if active_id == package.package_id:
-            default_dir = self.root / DEFAULT_PACKAGE_ID
-            if not default_dir.is_dir():
-                raise CharacterPackageError(
-                    "缺少默认角色，无法删除当前角色。请先重新安装默认角色。"
-                )
-            fallback = self.activate(DEFAULT_PACKAGE_ID)
-        shutil.rmtree(target)
-        return fallback
+        return self._transactions.delete_package(package_id)
 
     def package_matches_zip(self, package_id: str, zip_path: str) -> bool:
         """比较已安装目录与可信发行归档，用于内置角色升级和自修复。"""
-        target = self.root / self._validated_id(package_id)
-        if not target.is_dir():
-            return False
-        path = Path(zip_path)
-        try:
-            metadata, prefix = self._read_zip_metadata(path)
-            if self._validated_id(metadata.get("id", "")) != package_id:
-                return False
-            with zipfile.ZipFile(path) as archive:
-                members = {
-                    relative.as_posix(): info
-                    for info in archive.infolist()
-                    if (
-                        (relative := self._relative_member(
-                            info.filename, prefix
-                        )) is not None
-                        and not info.is_dir()
-                    )
-                }
-                installed = {
-                    file.relative_to(target).as_posix(): file
-                    for file in target.rglob("*")
-                    if file.is_file()
-                }
-                if set(members) != set(installed):
-                    return False
-                for name, info in members.items():
-                    local = installed[name]
-                    if local.stat().st_size != info.file_size:
-                        return False
-                    with archive.open(info) as source, local.open("rb") as disk:
-                        if self._stream_digest(source) != self._stream_digest(disk):
-                            return False
-            return True
-        except (OSError, zipfile.BadZipFile, CharacterPackageError):
-            return False
-
-    @staticmethod
-    def _stream_digest(stream) -> bytes:
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-        return digest.digest()
+        return self._transactions.package_matches_zip(package_id, zip_path)
 
     def _read_zip_metadata(self, path: Path):
         if path.suffix.lower() != ".zip" or not path.is_file():
@@ -432,11 +500,11 @@ class CharacterPackageManager:
 
         metadata = self._parse_frontmatter(text)
         # 用 ZIP 内文件表验证所有声明资源。
-        names = {
-            self._relative_member(info.filename, prefix).as_posix()
-            for info in infos
-            if self._relative_member(info.filename, prefix) is not None
-        }
+        names = set()
+        for info in infos:
+            relative = self._relative_member(info.filename, prefix)
+            if relative is not None:
+                names.add(relative.as_posix())
         self._validate_metadata(metadata, names)
         self._validate_zip_images(path=path, metadata=metadata, prefix=prefix)
         return metadata, prefix
@@ -455,11 +523,20 @@ class CharacterPackageManager:
         self._validate_directory_images(directory, metadata)
         return self._metadata_to_package(metadata, directory)
 
-    def _metadata_to_package(self, metadata, root: Path, prefix=""):
+    def _metadata_to_package(
+        self,
+        metadata: Dict[str, Any],
+        root: Path,
+        prefix: str = "",
+    ):
         schema_version = str(metadata.get("schema_version", "1.0"))
         schema_major = self._schema_major(metadata)
-        animations = {}
-        for state, raw in metadata.get("animations", {}).items():
+        animations: Dict[str, AnimationSpec] = {}
+        raw_animations = metadata.get("animations", {})
+        if not isinstance(raw_animations, dict):
+            raise CharacterPackageError("animations 必须是对象。")
+        for state_value, raw in raw_animations.items():
+            state = str(state_value)
             normalized_state = STATE_ALIASES.get(state, state)
             if normalized_state in animations:
                 raise CharacterPackageError(
@@ -467,6 +544,10 @@ class CharacterPackageManager:
                 )
             if isinstance(raw, str):
                 raw = {"files": [raw]}
+            if not isinstance(raw, dict):
+                raise CharacterPackageError(
+                    f"动作 {state} 的配置必须是对象或图片路径。"
+                )
             frames = self._frames_from_animation(
                 raw, root=root, prefix=prefix, schema_major=schema_major
             )
@@ -478,12 +559,25 @@ class CharacterPackageManager:
             anchor = self._int_pair(raw.get("anchor", [96, 194]), "anchor")
             animations[normalized_state] = AnimationSpec(
                 frames=frames,
-                fps=max(1, min(30, int(raw.get("fps", 8)))),
+                fps=max(
+                    1,
+                    min(30, self._int_value(raw.get("fps", 8), "fps")),
+                ),
                 playback=playback,
                 anchor=anchor,
-                priority=max(0, min(100, int(
-                    raw.get("priority", self._default_priority(normalized_state))
-                ))),
+                priority=max(
+                    0,
+                    min(
+                        100,
+                        self._int_value(
+                            raw.get(
+                                "priority",
+                                self._default_priority(normalized_state),
+                            ),
+                            "priority",
+                        ),
+                    ),
+                ),
                 interruptible=bool(raw.get("interruptible", True)),
                 legacy_effects=schema_major < 2 and len(frames) == 1,
             )
@@ -753,9 +847,16 @@ class CharacterPackageManager:
                 raise CharacterPackageError(
                     f"动作 {state} 的 source.file 不能为空。"
                 )
+            if (
+                isinstance(frames, bool)
+                or not isinstance(frames, (int, str))
+            ):
+                raise CharacterPackageError(
+                    f"动作 {state} 的 source.frames 必须是整数。"
+                )
             try:
                 frame_count = int(frames)
-            except (TypeError, ValueError) as exc:
+            except ValueError as exc:
                 raise CharacterPackageError(
                     f"动作 {state} 的 source.frames 必须是整数。"
                 ) from exc
@@ -857,6 +958,15 @@ class CharacterPackageManager:
         return pair
 
     @staticmethod
+    def _int_value(value: Any, label: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise CharacterPackageError(f"{label} 必须是整数。")
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise CharacterPackageError(f"{label} 必须是整数。") from exc
+
+    @staticmethod
     def _default_priority(state: str) -> int:
         if state == "dragging":
             return 100
@@ -953,9 +1063,18 @@ class CharacterPackageManager:
 
     @staticmethod
     def _read_image_size(
-        *, path: Path = None, raw: bytes = None, label: str = None
+        *,
+        path: Optional[Path] = None,
+        raw: Optional[bytes] = None,
+        label: Optional[str] = None,
     ) -> Tuple[int, int]:
-        source = io.BytesIO(raw) if raw is not None else path
+        if raw is None and path is None:
+            raise CharacterPackageError("缺少待检查的图片来源。")
+        if raw is not None:
+            source = io.BytesIO(raw)
+        else:
+            assert path is not None
+            source = path
         display = label or str(path)
         try:
             with Image.open(source) as image:

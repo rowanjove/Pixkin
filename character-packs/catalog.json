@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "shanshan",
+      "name": "山山",
+      "version": "2.0.0",
+      "archive_url": "https://github.com/pixkin-app/pixkin/releases/download/characters-v2/shanshan.zip",
+      "sha256": "a3aa31ee6671d5827f7b0029f139fd71801286f3ccbeb657d57872c58dd97553",
+      "source": "official",
+      "min_app_version": "1.3.0",
+      "max_app_version": ""
+    },
+    {
+      "id": "linlin",
+      "name": "凛凛",
+      "version": "2.0.0",
+      "archive_url": "https://github.com/pixkin-app/pixkin/releases/download/characters-v2/linlin.zip",
+      "sha256": "2a3430ee21bc7531523be54a95b2c3c5b646059a483ceb150d19da979d01688e",
+      "source": "official",
+      "min_app_version": "1.3.0",
+      "max_app_version": ""
+    },
+    {
+      "id": "pip",
+      "name": "Pip",
+      "version": "2.0.0",
+      "archive_url": "https://github.com/pixkin-app/pixkin/releases/download/characters-v2/pip.zip",
+      "sha256": "f585f5d66260a3defe72d7a6a258ab61fcf687aa1eec5d2a43227a00bb2fa541",
+      "source": "official",
+      "min_app_version": "1.3.0",
+      "max_app_version": ""
+    }
+  ]
+}

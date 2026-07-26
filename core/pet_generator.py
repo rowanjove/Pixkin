@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import io
 import re
@@ -6,10 +5,9 @@ import shutil
 import time
 import uuid
 import zipfile
-from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Iterable, Optional, cast
 
 import yaml
 from openai import OpenAI
@@ -19,6 +17,14 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.pet_animation_builder import LOOP_STATES, PetAnimationBuilder
 from core.pet_animation_qa import PetAnimationQa
 from core.pet_generation_diagnostics import PetGenerationDiagnostics
+from core.generation.state_machine import GenerationStateMachine
+from core.providers.image.base import (
+    ImageProvider,
+    classify_image_error,
+)
+from core.providers.image.openai_compatible import (
+    OpenAICompatibleImageProvider,
+)
 from core.pet_generation_run import PetGenerationRunStore
 from core.pet_generation_qa import PetGenerationQa
 from core.version import VERSION
@@ -176,12 +182,13 @@ class PetGenerationWorker(QThread):
         style_notes: str,
         reference_paths,
         full_hatch: bool = True,
-        generation_mode: str = None,
+        generation_mode: Optional[str] = None,
         allow_horizontal_mirror: bool = False,
-        max_api_calls: int = None,
-        run_id: str = None,
-        run_store: PetGenerationRunStore = None,
-        retry_task_id: str = None,
+        max_api_calls: Optional[int] = None,
+        run_id: Optional[str] = None,
+        run_store: Optional[PetGenerationRunStore] = None,
+        retry_task_id: Optional[str] = None,
+        image_provider: Optional[ImageProvider] = None,
     ):
         super().__init__()
         self.api_key = api_key
@@ -219,10 +226,10 @@ class PetGenerationWorker(QThread):
             self.max_api_calls = int(max_api_calls)
             if self.max_api_calls < 1:
                 raise ValueError("图像 API 调用预算必须至少为 1。")
-        self._client = None
+        self._client: Optional[ImageProvider] = image_provider
         self._preflight_complete = False
-        self.run_id = run_id
-        self._run_store = run_store
+        self.run_id = run_id or ""
+        self._run_store = run_store or PetGenerationRunStore()
         self.retry_task_id = retry_task_id
         self._active_task_id = None
 
@@ -232,8 +239,9 @@ class PetGenerationWorker(QThread):
         *,
         run_id: str,
         api_key: str,
-        run_store: PetGenerationRunStore = None,
-        retry_task_id: str = None,
+        run_store: Optional[PetGenerationRunStore] = None,
+        retry_task_id: Optional[str] = None,
+        image_provider: Optional[ImageProvider] = None,
     ):
         store = run_store or PetGenerationRunStore()
         record = store.load(run_id)
@@ -268,6 +276,7 @@ class PetGenerationWorker(QThread):
             run_id=run_id,
             run_store=store,
             retry_task_id=retry_task_id,
+            image_provider=image_provider,
         )
 
     def cancel(self):
@@ -339,56 +348,7 @@ class PetGenerationWorker(QThread):
 
     @staticmethod
     def classify_generation_error(exc):
-        status = getattr(exc, "status_code", None)
-        try:
-            status = int(status) if status is not None else None
-        except (TypeError, ValueError):
-            status = None
-        name = type(exc).__name__.lower()
-        if status == 401 or "authentication" in name:
-            category, retriable = "authentication", False
-        elif status == 403 or "permission" in name:
-            category, retriable = "permission", False
-        elif status in {400, 413, 415, 422} or "badrequest" in name:
-            category, retriable = "invalid_request", False
-        elif status == 404 or "notfound" in name:
-            category, retriable = "not_found", False
-        elif status == 429 or "ratelimit" in name:
-            category, retriable = "rate_limit", True
-        elif status in {408, 504} or "timeout" in name:
-            category, retriable = "timeout", True
-        elif status is not None and status >= 500:
-            category, retriable = "server", True
-        elif (
-            "没有返回可用图片" in str(exc)
-            or "图片数据损坏" in str(exc)
-        ):
-            category, retriable = "invalid_response", True
-        elif (
-            "connection" in name
-            or isinstance(exc, (ConnectionError, TimeoutError))
-        ):
-            category, retriable = "connection", True
-        else:
-            category, retriable = "unknown", False
-        labels = {
-            "authentication": "认证失败",
-            "permission": "接口无权限",
-            "invalid_request": "请求参数不受支持",
-            "not_found": "接口或模型不存在",
-            "rate_limit": "接口限流",
-            "timeout": "接口超时",
-            "server": "接口服务异常",
-            "invalid_response": "接口图片响应无效",
-            "connection": "网络连接失败",
-            "unknown": "未知错误",
-        }
-        return {
-            "category": category,
-            "retriable": retriable,
-            "label": labels[category],
-            "status_code": status,
-        }
+        return classify_image_error(exc).as_dict()
 
     @staticmethod
     def mirror_dependents(source_state: str):
@@ -400,10 +360,9 @@ class PetGenerationWorker(QThread):
 
     def run(self):
         try:
-            self._run_store = self._run_store or PetGenerationRunStore()
             pose_items = self._pose_items()
             slug = self._slug()
-            if self.run_id is None:
+            if not self.run_id:
                 self._validate_generation_inputs()
                 self.run_id = f"{slug}-{uuid.uuid4().hex[:8]}"
                 self._run_store.create(
@@ -434,6 +393,15 @@ class PetGenerationWorker(QThread):
                 self.run_created.emit(self.run_id)
                 self._snapshot_references()
             record = self._run_store.load(self.run_id)
+            recovery = GenerationStateMachine.recovery_transition(record)
+            if recovery is not None:
+                recovery_stage, recovery_status = recovery
+                record = self._run_store.update_stage(
+                    self.run_id,
+                    recovery_stage.value,
+                    status=recovery_status,
+                    reason="resume_after_interruption",
+                )
             work = self._run_store.workspace(self.run_id)
             images_dir = work / "images"
             images_dir.mkdir(parents=True, exist_ok=True)
@@ -559,7 +527,7 @@ class PetGenerationWorker(QThread):
                 self.run_id, "action_generation", status="running"
             )
             generated = self._completed_images(images_dir, pose_items)
-            review_pose_ids = set(CORE_REVIEW_POSE_IDS)
+            review_pose_ids: set[str] = set(CORE_REVIEW_POSE_IDS)
             if self.generation_mode == "full":
                 review_pose_ids.add("run_right")
             core_items = [
@@ -893,6 +861,7 @@ class PetGenerationWorker(QThread):
             if (
                 self.allow_horizontal_mirror
                 and self.retry_task_id != state
+                and mirror_source is not None
                 and mirror_source in generated
             ):
                 index = positions[state]
@@ -1050,95 +1019,55 @@ class PetGenerationWorker(QThread):
 
     def _generation_client(self):
         if self._client is None:
-            self._client = OpenAI(
+            self._client = OpenAICompatibleImageProvider(
                 api_key=self.api_key,
                 base_url=self.base_url or "https://api.openai.com/v1",
-                timeout=180.0,
-                max_retries=0,
+                model=self.model or "gpt-image-2",
+                quality=self.quality or "medium",
+                client_factory=OpenAI,
             )
         return self._client
 
     def _preflight_generation_client(self, client):
         if self._preflight_complete:
             return
-        endpoint = self.base_url or "https://api.openai.com/v1"
-        parsed = urlparse(endpoint)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("图像接口地址必须是完整的 HTTP(S) URL。")
-        model = self.model or "gpt-image-2"
-        quality = self.quality or "medium"
-        if not model.strip():
-            raise ValueError("图像模型名不能为空。")
-        if quality not in {"low", "medium", "high"}:
-            raise ValueError("图像质量必须是 low、medium 或 high。")
-        edit = getattr(getattr(client, "images", None), "edit", None)
-        if not callable(edit):
-            raise ValueError("当前接口客户端不支持图像编辑能力。")
-
-        cache_key = hashlib.sha256(
-            f"{endpoint.rstrip('/')}|{model}".encode("utf-8")
-        ).hexdigest()[:16]
+        provider = (
+            client
+            if isinstance(client, ImageProvider)
+            else OpenAICompatibleImageProvider(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                model=self.model,
+                quality=self.quality,
+                client=client,
+            )
+        )
+        provider.validate()
         record = self._run_store.load(self.run_id)
         cached = record.get("request", {}).get(
             "capability_preflight", {}
         )
         if (
             isinstance(cached, dict)
-            and cached.get("key") == cache_key
+            and cached.get("key") == provider.cache_key
             and cached.get("status") in {"verified", "unverified"}
         ):
             self._preflight_complete = True
             return
 
-        status = "verified"
-        note = "模型查询成功，图像编辑方法可用。"
-        retrieve = getattr(
-            getattr(client, "models", None),
-            "retrieve",
-            None,
-        )
-        if not callable(retrieve):
-            status = "unverified"
-            note = "兼容接口未提供模型查询方法，已保留图像编辑能力检查。"
-        else:
-            try:
-                retrieve(model, timeout=15.0)
-            except Exception as exc:
-                details = self.classify_generation_error(exc)
-                official = parsed.hostname in {
-                    "api.openai.com",
-                    "www.api.openai.com",
-                }
-                if details["category"] in {
-                    "authentication",
-                    "permission",
-                } or (
-                    official
-                    and details["category"] in {
-                        "invalid_request",
-                        "not_found",
-                    }
-                ):
-                    raise RuntimeError(
-                        f"图像接口预检失败（{details['label']}）：{exc}"
-                    ) from exc
-                status = "unverified"
-                note = (
-                    f"模型查询无法验证（{details['label']}），"
-                    "将由首次图像请求确认能力。"
-                )
+        health = provider.health_check()
         self._run_store.update_request(
             self.run_id,
             {
                 "capability_preflight": {
-                    "key": cache_key,
-                    "status": status,
-                    "endpoint": endpoint,
-                    "model": model,
+                    "key": provider.cache_key,
+                    "status": health.status,
+                    "endpoint": provider.endpoint,
+                    "model": provider.model,
                     "checked_at": datetime.now(
                         timezone.utc
                     ).isoformat(timespec="seconds"),
-                    "note": note,
+                    "note": health.note,
                 }
             },
         )
@@ -1337,28 +1266,16 @@ class PetGenerationWorker(QThread):
                 status="canceled",
             )
 
-    def _generate(self, client: OpenAI, paths, prompt: str) -> bytes:
-        with ExitStack() as stack:
-            files = [stack.enter_context(Path(path).open("rb")) for path in paths]
-            result = client.images.edit(
-                model=self.model or "gpt-image-2",
-                image=files,
-                prompt=prompt,
-                size="1024x1024",
-                quality=self.quality or "medium",
-                response_format="b64_json",
-            )
-        encoded = (
-            result.data[0].b64_json
-            if getattr(result, "data", None)
-            else None
+    def _generate(
+        self,
+        client: ImageProvider,
+        paths,
+        prompt: str,
+    ) -> bytes:
+        return client.edit(
+            [Path(path) for path in paths],
+            prompt,
         )
-        if not encoded:
-            raise RuntimeError("图像服务没有返回可用图片。")
-        try:
-            return base64.b64decode(encoded, validate=True)
-        except (ValueError, TypeError) as exc:
-            raise RuntimeError("图像服务返回的图片数据损坏。") from exc
 
     def _base_prompt(self):
         notes = self.style_notes or "Preserve the reference's broad color mood."
@@ -1382,7 +1299,10 @@ class PetGenerationWorker(QThread):
         image = Image.open(io.BytesIO(raw)).convert("RGB")
         image.thumbnail((640, 640), Image.Resampling.LANCZOS)
         flat_data = getattr(image, "get_flattened_data", image.getdata)
-        pixels = list(flat_data())
+        pixels = list(cast(
+            Iterable[tuple[int, int, int]],
+            flat_data(),
+        ))
         corners = [
             pixels[0],
             pixels[image.width - 1],

@@ -47,7 +47,7 @@ VSVersionInfo(
         u'080404B0',
         [
           StringStruct(u'CompanyName', u'Pixkin'),
-          StringStruct(u'FileDescription', u'Pixkin AI Desktop Companion'),
+          StringStruct(u'FileDescription', u'Pixkin AI 桌面伙伴'),
           StringStruct(u'FileVersion', u'{version}'),
           StringStruct(u'InternalName', u'Pixkin'),
           StringStruct(u'LegalCopyright', u'Copyright © 2026'),

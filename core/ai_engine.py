@@ -1,11 +1,15 @@
-import json
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from PyQt6.QtCore import QThread, pyqtSignal
-from openai import OpenAI
+
+from core.providers.chat.base import ChatProvider, classify_chat_error
+from core.providers.chat.openai_compatible import OpenAICompatibleChatProvider
+from core.services.chat_service import ChatService
 from core.tool_registry import ToolRegistry
 
+
 class AiWorkerThread(QThread):
-    """用于在后台线程处理 OpenAI / DeepSeek 对话及 Tool Calls 的 QThread"""
+    """只负责聊天服务的后台线程生命周期和 Qt 信号转发。"""
     chunk_received = pyqtSignal(str)       # 流式打字机输出信号
     tool_executing = pyqtSignal(str)      # 正在执行 Tool 的通知信号
     finished_response = pyqtSignal(str)   # 对话最终完成信号
@@ -18,7 +22,8 @@ class AiWorkerThread(QThread):
         model: str,
         system_prompt: str,
         messages: List[Dict[str, Any]],
-        tool_registry: ToolRegistry
+        tool_registry: ToolRegistry,
+        provider: Optional[ChatProvider] = None,
     ):
         super().__init__()
         self.base_url = base_url or "https://api.deepseek.com/v1"
@@ -27,14 +32,15 @@ class AiWorkerThread(QThread):
         self.system_prompt = system_prompt
         self.messages = messages
         self.tool_registry = tool_registry
-        self._client = None
+        self._provider = provider
+        self._service: Optional[ChatService] = None
 
     def cancel(self):
         """请求尽快取消正在进行的网络调用。"""
         self.requestInterruption()
-        if self._client is not None:
+        if self._service is not None:
             try:
-                self._client.close()
+                self._service.close()
             except Exception:
                 pass
 
@@ -44,110 +50,42 @@ class AiWorkerThread(QThread):
             return
 
         try:
-            client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=45.0)
-            self._client = client
-
-            full_messages = [{"role": "system", "content": self.system_prompt}]
-            full_messages.extend(self.messages)
-
-            tools_schema = self.tool_registry.get_tools_schema()
-
-            # 最多允许连续 4 轮工具调用，支持组合任务，同时避免模型无限循环。
-            for _ in range(4):
-                if self.isInterruptionRequested():
-                    return
-                request = {
-                    "model": self.model,
-                    "messages": full_messages,
-                    "stream": True,
-                }
-                if tools_schema:
-                    request.update({"tools": tools_schema, "tool_choice": "auto"})
-
-                reply_text, tool_calls = self._stream_completion(client, request)
-                if self.isInterruptionRequested():
-                    return
-
-                if not tool_calls:
-                    self.finished_response.emit(reply_text)
-                    return
-
-                full_messages.append({
-                    "role": "assistant",
-                    "content": reply_text or None,
-                    "tool_calls": tool_calls,
-                })
-                for tool_call in tool_calls:
-                    function = tool_call["function"]
-                    function_name = function["name"]
-                    try:
-                        function_args = json.loads(function["arguments"])
-                    except (TypeError, json.JSONDecodeError):
-                        function_args = {}
-
-                    self.tool_executing.emit(f"正在使用工具：{function_name}")
-                    tool_result = self.tool_registry.execute_tool(function_name, function_args)
-                    full_messages.append({
-                        "tool_call_id": tool_call["id"],
-                        "role": "tool",
-                        "name": function_name,
-                        "content": tool_result,
-                    })
-
-            raise RuntimeError("工具调用次数过多，已停止本次请求")
+            provider = self._provider or OpenAICompatibleChatProvider(
+                api_key=self.api_key,
+                base_url=self.base_url,
+            )
+            self._service = ChatService(
+                provider=provider,
+                model=self.model,
+                system_prompt=self.system_prompt,
+                messages=self.messages,
+                tool_registry=self.tool_registry,
+            )
+            response = self._service.run(
+                on_chunk=self.chunk_received.emit,
+                on_tool_executing=lambda name: self.tool_executing.emit(
+                    f"正在使用工具：{name}"
+                ),
+                is_cancelled=self.isInterruptionRequested,
+            )
+            if response is not None:
+                self.finished_response.emit(response)
 
         except Exception as e:
             if not self.isInterruptionRequested():
-                self.error_occurred.emit(f"大模型请求失败: {str(e)}")
+                details = classify_chat_error(e)
+                retry_hint = (
+                    "可以直接重试本条消息。"
+                    if details.retriable
+                    else details.recovery
+                )
+                self.error_occurred.emit(
+                    f"大模型请求失败（{details.label}）。{retry_hint}"
+                )
         finally:
-            if self._client is not None:
+            if self._service is not None:
                 try:
-                    self._client.close()
+                    self._service.close()
                 except Exception:
                     pass
-                self._client = None
-
-    def _stream_completion(self, client: OpenAI, request):
-        """消费一次流式响应，同时拼装可能被拆分的 Tool Call。"""
-        text_parts = []
-        pending_calls = {}
-        stream = client.chat.completions.create(**request)
-        try:
-            for chunk in stream:
-                if self.isInterruptionRequested():
-                    return "", []
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    text_parts.append(delta.content)
-                    self.chunk_received.emit(delta.content)
-                for call_delta in delta.tool_calls or []:
-                    index = call_delta.index
-                    assembled = pending_calls.setdefault(
-                        index,
-                        {
-                            "id": "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        },
-                    )
-                    if call_delta.id:
-                        assembled["id"] = call_delta.id
-                    if call_delta.type:
-                        assembled["type"] = call_delta.type
-                    if call_delta.function:
-                        if call_delta.function.name:
-                            assembled["function"]["name"] += call_delta.function.name
-                        if call_delta.function.arguments:
-                            assembled["function"]["arguments"] += (
-                                call_delta.function.arguments
-                            )
-        finally:
-            close = getattr(stream, "close", None)
-            if close:
-                close()
-        tool_calls = [
-            pending_calls[index] for index in sorted(pending_calls)
-        ]
-        return "".join(text_parts), tool_calls
+                self._service = None

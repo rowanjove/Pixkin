@@ -6,6 +6,7 @@ module instead of repeating a version literal.
 
 APP_NAME = "Pixkin"
 VERSION = "1.3.0"
+MINIMUM_UPDATE_VERSION = "1.3.0"
 
 
 def portable_executable_name() -> str:

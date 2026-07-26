@@ -7,13 +7,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core.ai_engine import AiWorkerThread
 from core.app_logging import configure_logging
 from core.chat_history_store import ChatHistoryStore
 from core.config import ConfigManager
+from core.providers.chat.openai_compatible import (
+    OpenAICompatibleChatProvider,
+)
 from core.secrets import (
     CHAT_TARGET, LEGACY_TARGET, SecretStore
 )
+from core.services.tool_permission_service import ToolPermissionService
 from core.tool_registry import ToolRegistry
 
 
@@ -77,6 +80,29 @@ class ConfigManagerTests(unittest.TestCase):
             self.assertEqual(config.get("pet", "scale"), 1.0)
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertFalse(list(Path(directory).glob(".pixkin-config-*.tmp")))
+
+    def test_corrupt_config_is_backed_up_before_future_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            corrupt = b'{"broken":'
+            path.write_bytes(corrupt)
+
+            config = ConfigManager(str(path))
+            self.assertTrue(config.set("pet", "scale", 1.25))
+
+            backups = list(
+                Path(directory).glob(
+                    "config.json.corrupt-*.bak"
+                )
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), corrupt)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))[
+                    "pet"
+                ]["scale"],
+                1.25,
+            )
 
 
 class LoggingTests(unittest.TestCase):
@@ -234,21 +260,32 @@ class AiStreamingTests(unittest.TestCase):
                 completions=SimpleNamespace(create=lambda **_request: stream)
             )
         )
-        worker = AiWorkerThread(
-            base_url="https://example.test/v1",
+        provider = OpenAICompatibleChatProvider(
             api_key="test",
-            model="test",
-            system_prompt="test",
-            messages=[],
-            tool_registry=ToolRegistry(),
+            base_url="https://example.test/v1",
+            client=client,
         )
 
-        text, calls = worker._stream_completion(client, {"stream": True})
+        chunks = []
+        result = provider.stream_completion(
+            model="test",
+            messages=[],
+            tools=[],
+            on_chunk=chunks.append,
+            is_cancelled=lambda: False,
+        )
 
-        self.assertEqual(text, "你好")
-        self.assertEqual(calls[0]["id"], "call-1")
-        self.assertEqual(calls[0]["function"]["name"], "get_current_time")
-        self.assertEqual(calls[0]["function"]["arguments"], "{}")
+        self.assertEqual(result.text, "你好")
+        self.assertEqual(chunks, ["你好"])
+        self.assertEqual(result.tool_calls[0]["id"], "call-1")
+        self.assertEqual(
+            result.tool_calls[0]["function"]["name"],
+            "get_current_time",
+        )
+        self.assertEqual(
+            result.tool_calls[0]["function"]["arguments"],
+            "{}",
+        )
         self.assertTrue(stream.closed)
 
 
@@ -277,7 +314,9 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("Error executing tool", rejected)
 
     def test_open_url_restricts_protocols(self):
-        registry = ToolRegistry()
+        registry = ToolRegistry(
+            ToolPermissionService(confirm_external=lambda _request: True)
+        )
         with patch(
             "core.tool_registry.webbrowser.open", return_value=True
         ) as open_url:

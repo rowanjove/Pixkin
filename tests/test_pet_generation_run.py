@@ -10,6 +10,37 @@ from core.pet_generation_run import (
 )
 
 
+def advance_to_final_review(store, run_id, artifacts=None):
+    store.update_stage(run_id, "action_generation", status="running")
+    store.update_stage(
+        run_id,
+        "qa_complete",
+        status="running",
+        artifacts={
+            "qa_contact_sheet": "qa-contact-sheet.png",
+            "qa_report": "qa-report.json",
+        },
+    )
+    store.update_stage(
+        run_id,
+        "animation_qa_complete",
+        status="running",
+        artifacts={
+            "animation_qa_report": "animation-qa.json",
+            "animation_previews": {"idle": "idle.gif"},
+        },
+    )
+    store.update_stage(run_id, "packaging", status="running")
+    final_artifacts = {"package": "pet.zip"}
+    final_artifacts.update(artifacts or {})
+    return store.update_stage(
+        run_id,
+        "final_review",
+        status="needs_review",
+        artifacts=final_artifacts,
+    )
+
+
 class PetGenerationRunStoreTests(unittest.TestCase):
     def test_run_manifest_tracks_stage_tasks_and_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -37,22 +68,30 @@ class PetGenerationRunStoreTests(unittest.TestCase):
                 "complete",
                 artifact="images/idle.png",
             )
-            ready = store.update_stage(
+            ready = advance_to_final_review(
+                store,
                 created["id"],
-                "ready",
-                status="complete",
-                artifacts={"package": "test-pet.zip"},
+                {"package": "test-pet.zip"},
+            )
+            installed = store.complete_install(
+                created["id"], "test-pet"
             )
 
-            self.assertEqual(ready["status"], "complete")
-            self.assertEqual(ready["stage"], "ready")
-            self.assertEqual(ready["tasks"]["idle"]["attempts"], 1)
+            self.assertEqual(installed["status"], "complete")
+            self.assertEqual(installed["stage"], "installed")
+            self.assertEqual(installed["tasks"]["idle"]["attempts"], 1)
             self.assertEqual(
-                ready["tasks"]["idle"]["artifact"], "images/idle.png"
+                installed["tasks"]["idle"]["artifact"],
+                "images/idle.png",
             )
             self.assertEqual(
-                ready["artifacts"]["package"], "test-pet.zip"
+                installed["artifacts"]["package"], "test-pet.zip"
             )
+            self.assertEqual(
+                installed["reviews"]["final_package"]["decision"],
+                "accepted",
+            )
+            self.assertGreaterEqual(len(ready["state_history"]), 6)
 
     def test_manifest_write_is_atomic_and_leaves_no_temporary_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -62,13 +101,17 @@ class PetGenerationRunStoreTests(unittest.TestCase):
                 request={},
                 task_ids=["canonical"],
             )
-            store.update_stage(record["id"], "running", status="running")
+            store.update_stage(
+                record["id"],
+                "canonical_generation",
+                status="running",
+            )
 
             workspace = store.workspace(record["id"])
             parsed = json.loads(
                 (workspace / "run.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(parsed["stage"], "running")
+            self.assertEqual(parsed["stage"], "canonical_generation")
             self.assertEqual(list(workspace.glob(".run-*.tmp")), [])
 
     def test_api_call_metrics_are_persisted_and_validated(self):
@@ -333,11 +376,10 @@ class PetGenerationRunStoreTests(unittest.TestCase):
             store.record_review(
                 run["id"], "core_actions", "accepted"
             )
-            store.update_stage(
+            advance_to_final_review(
+                store,
                 run["id"],
-                "final_review",
-                status="needs_review",
-                artifacts={
+                {
                     "package": "identity-switch.zip",
                     "qa_report": "qa/final/report.json",
                 },

@@ -1,0 +1,9 @@
+{
+  "code": 0,
+  "message": "0",
+  "data": {
+    "room_id": 10001,
+    "live_status": 1,
+    "title": "一起画画"
+  }
+}

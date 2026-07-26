@@ -1,19 +1,21 @@
 import logging
-import math
 
 from PyQt6.QtCore import (
     Qt, QPoint, QRect, QPropertyAnimation, QEasingCurve, QTimer
 )
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtGui import (
-    QPainter, QColor, QBrush, QPen, QPainterPath, QMouseEvent,
-    QRadialGradient, QLinearGradient, QPixmap, QRegion
-)
+from PyQt6.QtGui import QMouseEvent, QPainter
 
 from core.character_package import CharacterPackage
 from core.config import ConfigManager
 from core.pet_animator import PetAnimator, PetState
+from core.services.display_layout import (
+    DisplayRect,
+    overlay_position,
+    pet_position,
+)
 from ui.chat_window import ChatBubbleWindow
+from ui.pet_rendering import PetRenderer
 
 
 LOGGER = logging.getLogger("desktop_pet.pet_window")
@@ -44,14 +46,27 @@ class PetWindow(QWidget):
         self._ignore_next_release = False
         self.peek_size = 45
         self._pending_redock = None
-        self.character_package = None
-        self._character_frames = {}
-        self._dedicated_edge_states = set()
-        self._edge_subject_bounds = {}
-        self._edge_design_reveals = {}
         self._state_started_tick = 0
         self._roam_animation = None
         self._roam_state = None
+        self.character_package = None
+        self.character_renderer = PetRenderer(
+            self.animator,
+            design_size=self.DESIGN_SIZE,
+            edge_art_size=self.EDGE_ART_SIZE,
+            edge_reveal_padding=self.EDGE_REVEAL_PADDING,
+        )
+        # 兼容既有测试与调用；缓存由渲染器原地维护。
+        self._character_frames = self.character_renderer.character_frames
+        self._dedicated_edge_states = (
+            self.character_renderer.dedicated_edge_states
+        )
+        self._edge_subject_bounds = (
+            self.character_renderer.edge_subject_bounds
+        )
+        self._edge_design_reveals = (
+            self.character_renderer.edge_design_reveals
+        )
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
@@ -109,17 +124,30 @@ class PetWindow(QWidget):
 
     def _position_default(self):
         saved = self.config_manager.get("pet", "position", {})
-        if isinstance(saved, dict) and "x" in saved and "y" in saved:
-            x, y = int(saved["x"]), int(saved["y"])
-            center = QPoint(x + self.width() // 2, y + self.height() // 2)
-            if any(
-                screen.availableGeometry().contains(center)
-                for screen in QApplication.screens()
-            ):
-                self.move(x, y)
-                return
-        geo = QApplication.primaryScreen().availableGeometry()
-        self.move(geo.right() - self.width() - 28, geo.bottom() - self.height() - 44)
+        screens = [
+            self._display_rect(screen.availableGeometry())
+            for screen in QApplication.screens()
+        ]
+        primary = self._display_rect(
+            QApplication.primaryScreen().availableGeometry()
+        )
+        self.move(
+            *pet_position(
+                saved,
+                window_size=(self.width(), self.height()),
+                screens=screens,
+                primary=primary,
+            )
+        )
+
+    @staticmethod
+    def _display_rect(geometry: QRect) -> DisplayRect:
+        return DisplayRect(
+            geometry.left(),
+            geometry.top(),
+            geometry.width(),
+            geometry.height(),
+        )
 
     def save_position(self):
         if not self.is_docked:
@@ -134,55 +162,43 @@ class PetWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         scale = self.width() / self.DESIGN_SIZE
         painter.scale(scale, scale)
-
-        if self.character_package:
-            if self._should_draw_edge_art():
-                self._draw_package_peek(painter)
-            else:
-                self._draw_package_character(painter)
-        elif self._should_draw_edge_art():
-            self._draw_peek(painter)
-        else:
-            self._draw_character(painter)
+        self.character_renderer.draw(
+            painter,
+            tick=self.tick,
+            state_started_tick=self._state_started_tick,
+            dock_side=self.dock_side,
+            peek_size=self.peek_size,
+            window_width=self.width(),
+            edge_art=self._should_draw_edge_art(),
+        )
 
     def set_character(self, package: CharacterPackage):
         self.character_package = package
-        self._character_frames = {}
-        self._dedicated_edge_states = set()
-        self._edge_subject_bounds = {}
-        self._edge_design_reveals = {}
+        self.character_renderer.set_package(package)
         if package:
-            source_cache = {}
-            for state, animation in package.animations.items():
-                frames = []
-                for frame_spec in animation.frames:
-                    path = frame_spec.file
-                    source = source_cache.get(path)
-                    if source is None:
-                        source = QPixmap(str(path))
-                        source_cache[path] = source
-                    if source.isNull():
-                        continue
-                    pixmap = source
-                    if frame_spec.rect is not None:
-                        pixmap = source.copy(QRect(*frame_spec.rect))
-                    if not pixmap.isNull():
-                        frames.append(pixmap)
-                if frames:
-                    self._character_frames[state] = (frames, animation)
-                    if (
-                        state.startswith("edge_")
-                        and any(
-                            "edge" in {
-                                part.lower()
-                                for part in frame_spec.file.parts
-                            }
-                            for frame_spec in animation.frames
-                        )
-                    ):
-                        self._dedicated_edge_states.add(state)
+            behavior = dict(package.behavior)
+            overrides = self.config_manager.get(
+                "character_behavior_overrides", default={}
+            )
+            override = (
+                overrides.get(package.package_id, {})
+                if isinstance(overrides, dict)
+                else {}
+            )
+            if isinstance(override, dict):
+                for key in (
+                    "ambient_weights",
+                    "cooldown_seconds",
+                ):
+                    if isinstance(override.get(key), dict):
+                        behavior[key] = dict(override[key])
+                if "peek_size" in override:
+                    self.peek_size = max(
+                        36,
+                        min(96, int(override["peek_size"])),
+                    )
             self.animator.configure_animation_policies(package.animations)
-            self.animator.configure_behavior(package.behavior)
+            self.animator.configure_behavior(behavior)
             self.chat_window.set_character(package.name, package.preview)
         else:
             self.animator.configure_animation_policies({})
@@ -219,344 +235,18 @@ class PetWindow(QWidget):
             sides = defaults
         return bool(sides.get(side, defaults.get(side, False)))
 
-    def _entry_for_state(self, state_name: str):
-        entry = self._character_frames.get(state_name)
-        if not entry and state_name.startswith("edge_"):
-            entry = self._character_frames.get("edge_docked")
-        if not entry:
-            entry = self._character_frames.get("idle")
-        return entry
-
     def _current_package_frame(self, state_name: str):
-        entry = self._entry_for_state(state_name)
-        if not entry:
-            return None
-        frames, animation = entry
-        frame_index = int((self.tick - self._state_started_tick) * animation.fps / 25)
-        if animation.playback == "ping_pong" and len(frames) > 1:
-            cycle = len(frames) * 2 - 2
-            position = frame_index % cycle
-            frame_index = (
-                position if position < len(frames) else cycle - position
-            )
-        elif animation.loop:
-            frame_index %= len(frames)
-        else:
-            frame_index = min(frame_index, len(frames) - 1)
-        return frames[frame_index]
-
-    def _draw_package_character(self, painter: QPainter):
-        state_name = self.animator.current_state.value
-        entry = self._entry_for_state(state_name)
-        frame = self._current_package_frame(state_name)
-        if frame is None:
-            self._draw_character(painter)
-            return
-        _frames, animation = entry
-        target_width = 172
-        target_height = 172
-        scaled = frame.scaled(
-            target_width,
-            target_height,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+        return self.character_renderer.current_package_frame(
+            state_name,
+            tick=self.tick,
+            state_started_tick=self._state_started_tick,
         )
-        if animation.legacy_effects:
-            x = (self.DESIGN_SIZE - scaled.width()) // 2
-            y = self.DESIGN_SIZE - scaled.height()
-        else:
-            factor_x = scaled.width() / max(1, frame.width())
-            factor_y = scaled.height() / max(1, frame.height())
-            x = round(90 - animation.anchor[0] * factor_x)
-            y = round(168 - animation.anchor[1] * factor_y)
-        state = self.animator.current_state
-        scale_x = 1.0
-        scale_y = 1.0
-        rotation = 0.0
-        if animation.legacy_effects:
-            if state == PetState.IDLE:
-                y += int(math.sin(self.tick * 0.09) * 3)
-            elif state == PetState.BLINK:
-                scale_y = 0.96
-            elif state == PetState.STRETCH:
-                scale_x = 0.96
-                scale_y = 1.06
-                y -= 5
-            elif state == PetState.WAVE:
-                rotation = math.sin(self.tick * 0.28) * 4.5
-            elif state == PetState.NOD:
-                y += int(abs(math.sin(self.tick * 0.25)) * 6)
-            elif state == PetState.SLEEP:
-                rotation = -3.5
-                y += 4
-            elif state == PetState.DRAGGING:
-                rotation = math.sin(self.tick * 0.34) * 7
-            elif state == PetState.TALKING:
-                scale_x = 1.0 + math.sin(self.tick * 0.28) * 0.018
-                scale_y = 1.0 - math.sin(self.tick * 0.28) * 0.012
-            elif state in {
-                PetState.ALERTING,
-                PetState.ALERTING_IMPORTANT,
-                PetState.CELEBRATE_LIVE,
-            }:
-                y -= int(abs(math.sin(self.tick * 0.24)) * 12)
-                rotation = math.sin(self.tick * 0.3) * 3
-        painter.save()
-        center_x = x + scaled.width() / 2
-        center_y = y + scaled.height() / 2
-        painter.translate(center_x, center_y)
-        painter.rotate(rotation)
-        painter.scale(scale_x, scale_y)
-        painter.translate(-center_x, -center_y)
-        painter.drawPixmap(x, y, scaled)
-        painter.restore()
-
-    def _draw_package_peek(self, painter: QPainter):
-        current = self.animator.current_state.value
-        directional = current if current.startswith("edge_") else (
-            f"edge_idle_{self.dock_side}" if self.dock_side else "edge_docked"
-        )
-        frame = self._current_package_frame(directional)
-        if frame is None:
-            self._draw_peek(painter)
-            return
-        if directional in self._dedicated_edge_states:
-            self._draw_directional_package_peek(painter, frame)
-            return
-        peek = self.peek_size * self.DESIGN_SIZE / self.width()
-        scaled = frame.scaled(
-            64, 64,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        if self.dock_side == "left":
-            cx, cy = self.DESIGN_SIZE - peek / 2, 90
-        elif self.dock_side == "right":
-            cx, cy = peek / 2, 90
-        elif self.dock_side == "top":
-            cx, cy = 90, self.DESIGN_SIZE - peek / 2
-        else:
-            cx, cy = 90, peek / 2
-        painter.drawPixmap(
-            int(cx - scaled.width() / 2),
-            int(cy - scaled.height() / 2),
-            scaled,
-        )
-
-    def _draw_directional_package_peek(
-        self, painter: QPainter, frame: QPixmap
-    ):
-        """Align partial-head art so the OS crop becomes the screen edge."""
-        scaled, subject = self._scaled_edge_art(frame)
-        reveal = self._dedicated_edge_design_reveal(self.dock_side)
-        x = (self.DESIGN_SIZE - scaled.width()) // 2
-        y = (self.DESIGN_SIZE - scaled.height()) // 2
-        if self.dock_side == "left":
-            x = self.DESIGN_SIZE - reveal - subject.left()
-        elif self.dock_side == "right":
-            x = reveal - subject.right() - 1
-        elif self.dock_side == "top":
-            y = self.DESIGN_SIZE - reveal - subject.top()
-        elif self.dock_side == "bottom":
-            y = reveal - subject.bottom() - 1
-        painter.drawPixmap(x, y, scaled)
 
     def _scaled_edge_art(self, frame):
-        scaled = frame.scaled(
-            self.EDGE_ART_SIZE,
-            self.EDGE_ART_SIZE,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        cache_key = frame.cacheKey()
-        subject = self._edge_subject_bounds.get(cache_key)
-        if subject is None:
-            subject = QRegion(scaled.mask()).boundingRect()
-            if subject.isEmpty():
-                subject = scaled.rect()
-            self._edge_subject_bounds[cache_key] = subject
-        return scaled, subject
+        return self.character_renderer.scaled_edge_art(frame)
 
     def _dedicated_edge_design_reveal(self, side):
-        cached = self._edge_design_reveals.get(side)
-        if cached is not None:
-            return cached
-        extent = 0
-        for phase in ("enter", "idle", "hover", "exit"):
-            entry = self._character_frames.get(f"edge_{phase}_{side}")
-            if not entry:
-                continue
-            frames, _animation = entry
-            for frame in frames:
-                _scaled, subject = self._scaled_edge_art(frame)
-                span = (
-                    subject.width()
-                    if side in {"left", "right"}
-                    else subject.height()
-                )
-                extent = max(extent, span)
-        reveal = min(
-            self.EDGE_ART_SIZE,
-            max(1, extent) + self.EDGE_REVEAL_PADDING,
-        )
-        self._edge_design_reveals[side] = reveal
-        return reveal
-
-    def _draw_character(self, painter: QPainter):
-        state = self.animator.current_state
-        t = self.tick
-        cx = 90
-        float_y = math.sin(t * 0.09) * 2.5 if state == PetState.IDLE else 0
-        if state == PetState.ALERTING:
-            float_y = -abs(math.sin(t * 0.24)) * 15
-        elif state == PetState.NOD:
-            float_y = abs(math.sin(t * 0.22)) * 5
-        elif state == PetState.STRETCH:
-            float_y = -4
-
-        # 柔和落地阴影
-        shadow_w = 88 + (8 if state == PetState.ALERTING else 0)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(44, 34, 85, 42))
-        painter.drawEllipse(int(cx - shadow_w / 2), 149, int(shadow_w), 13)
-
-        # 尾巴
-        tail_pen = QPen(QColor("#7668E7"), 15, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        painter.setPen(tail_pen)
-        tail = QPainterPath()
-        tail.moveTo(126, 119 + float_y)
-        tail.cubicTo(158, 112 + float_y, 153, 84 + float_y, 137, 91 + float_y)
-        painter.drawPath(tail)
-
-        # 耳朵与内耳
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#6C5FDC"))
-        left_ear = QPainterPath()
-        left_ear.moveTo(51, 69 + float_y)
-        left_ear.cubicTo(37, 31 + float_y, 47, 23 + float_y, 72, 55 + float_y)
-        painter.drawPath(left_ear)
-        right_ear = QPainterPath()
-        right_ear.moveTo(129, 69 + float_y)
-        right_ear.cubicTo(143, 31 + float_y, 133, 23 + float_y, 108, 55 + float_y)
-        painter.drawPath(right_ear)
-        painter.setBrush(QColor("#F4A9C3"))
-        painter.drawPolygon(QPoint(49, 38 + int(float_y)), QPoint(57, 61 + int(float_y)), QPoint(65, 54 + int(float_y)))
-        painter.drawPolygon(QPoint(131, 38 + int(float_y)), QPoint(123, 61 + int(float_y)), QPoint(115, 54 + int(float_y)))
-
-        # 主体渐变
-        body_gradient = QLinearGradient(52, 55, 128, 144)
-        body_gradient.setColorAt(0, QColor("#8A7CF2"))
-        body_gradient.setColorAt(0.55, QColor("#7467E8"))
-        body_gradient.setColorAt(1, QColor("#5D50CD"))
-        painter.setBrush(QBrush(body_gradient))
-        painter.setPen(QPen(QColor(69, 57, 155, 95), 1.4))
-        painter.drawRoundedRect(43, int(54 + float_y), 94, 92, 45, 45)
-
-        # 额头高光与脸部
-        highlight = QRadialGradient(72, 67 + float_y, 47)
-        highlight.setColorAt(0, QColor(255, 255, 255, 72))
-        highlight.setColorAt(1, QColor(255, 255, 255, 0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(highlight)
-        painter.drawEllipse(48, int(57 + float_y), 84, 72)
-        painter.setBrush(QColor("#F8F6FF"))
-        painter.drawEllipse(56, int(79 + float_y), 68, 58)
-
-        eye_y = 92 + float_y
-        self._draw_face(painter, cx, eye_y, state)
-        self._draw_arms(painter, state, float_y)
-
-        if state == PetState.SLEEP:
-            painter.setPen(QPen(QColor("#7568D7"), 2))
-            painter.drawText(130, int(63 + float_y), "z")
-            painter.drawText(142, int(48 + float_y), "Z")
-        elif state == PetState.ALERTING:
-            painter.setPen(QPen(QColor("#F0A526"), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLine(35, 52, 25, 42)
-            painter.drawLine(145, 52, 155, 42)
-            painter.drawLine(90, 30, 90, 17)
-
-    def _draw_face(self, painter, cx, eye_y, state):
-        dark = QColor("#312A59")
-        if state in (PetState.BLINK, PetState.SLEEP):
-            painter.setPen(QPen(dark, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLine(67, int(eye_y), 78, int(eye_y))
-            painter.drawLine(102, int(eye_y), 113, int(eye_y))
-        else:
-            eye_h = 22 if state == PetState.DRAGGING else 18
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#FFFFFF"))
-            painter.drawEllipse(64, int(eye_y - 8), 18, eye_h)
-            painter.drawEllipse(98, int(eye_y - 8), 18, eye_h)
-            pupil_shift = int(math.sin(self.tick * 0.035) * 2)
-            painter.setBrush(dark)
-            painter.drawEllipse(69 + pupil_shift, int(eye_y - 3), 9, 11)
-            painter.drawEllipse(103 + pupil_shift, int(eye_y - 3), 9, 11)
-            painter.setBrush(QColor("#FFFFFF"))
-            painter.drawEllipse(71 + pupil_shift, int(eye_y - 1), 3, 3)
-            painter.drawEllipse(105 + pupil_shift, int(eye_y - 1), 3, 3)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(245, 125, 158, 115))
-        painter.drawEllipse(56, int(eye_y + 12), 14, 7)
-        painter.drawEllipse(110, int(eye_y + 12), 14, 7)
-
-        painter.setPen(QPen(dark, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        if state in (PetState.ALERTING, PetState.STRETCH):
-            painter.setBrush(QColor("#EB6B8C"))
-            painter.drawEllipse(82, int(eye_y + 13), 16, 13)
-        elif state == PetState.TALKING:
-            mouth_h = 7 + int(abs(math.sin(self.tick * 0.28)) * 7)
-            painter.setBrush(QColor("#EB6B8C"))
-            painter.drawEllipse(84, int(eye_y + 15), 12, mouth_h)
-        else:
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            mouth = QPainterPath()
-            mouth.moveTo(82, eye_y + 16)
-            mouth.quadTo(86, eye_y + 21, 90, eye_y + 16)
-            mouth.quadTo(94, eye_y + 21, 98, eye_y + 16)
-            painter.drawPath(mouth)
-
-    def _draw_arms(self, painter, state, float_y):
-        painter.setPen(QPen(QColor("#695BD7"), 13, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        if state == PetState.WAVE:
-            wave = math.sin(self.tick * 0.33) * 10
-            painter.drawLine(48, int(105 + float_y), int(27 + wave), int(75 + float_y))
-            painter.drawLine(132, int(105 + float_y), 143, int(124 + float_y))
-        elif state == PetState.STRETCH:
-            painter.drawLine(51, int(102 + float_y), 30, int(72 + float_y))
-            painter.drawLine(129, int(102 + float_y), 150, int(72 + float_y))
-        else:
-            painter.drawLine(48, int(109 + float_y), 37, int(126 + float_y))
-            painter.drawLine(132, int(109 + float_y), 143, int(126 + float_y))
-
-    def _draw_peek(self, painter):
-        """在屏幕可见的窄条里画一张完整小脸，真正形成“偷偷探头”。"""
-        peek = self.peek_size * self.DESIGN_SIZE / self.width()
-        if self.dock_side == "left":
-            cx, cy = self.DESIGN_SIZE - peek / 2, 90
-        elif self.dock_side == "right":
-            cx, cy = peek / 2, 90
-        elif self.dock_side == "top":
-            cx, cy = 90, self.DESIGN_SIZE - peek / 2
-        else:
-            cx, cy = 90, peek / 2
-
-        painter.setPen(QPen(QColor(70, 57, 157, 100), 1))
-        gradient = QRadialGradient(cx - 8, cy - 10, 38)
-        gradient.setColorAt(0, QColor("#9184F6"))
-        gradient.setColorAt(1, QColor("#6255D1"))
-        painter.setBrush(gradient)
-        painter.drawEllipse(int(cx - 31), int(cy - 29), 62, 58)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#FFFFFF"))
-        painter.drawEllipse(int(cx - 16), int(cy - 6), 10, 13)
-        painter.drawEllipse(int(cx + 6), int(cy - 6), 10, 13)
-        painter.setBrush(QColor("#332B5C"))
-        painter.drawEllipse(int(cx - 12), int(cy - 2), 5, 7)
-        painter.drawEllipse(int(cx + 9), int(cy - 2), 5, 7)
-        painter.setPen(QPen(QColor("#332B5C"), 2))
-        painter.drawArc(int(cx - 6), int(cy + 8), 12, 8, 0, -180 * 16)
+        return self.character_renderer.dedicated_edge_design_reveal(side)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -915,14 +605,17 @@ class PetWindow(QWidget):
 
     def _update_chat_position(self):
         geo = self._screen_geometry()
-        chat_w, chat_h = self.chat_window.width(), self.chat_window.height()
-        x = self.x() + (self.width() - chat_w) // 2
-        y = self.y() - chat_h - 8
-        if y < geo.top() + 8:
-            y = self.y() + self.height() + 8
-        x = max(geo.left() + 8, min(x, geo.right() - chat_w + 1 - 8))
-        y = max(geo.top() + 8, min(y, geo.bottom() - chat_h + 1 - 8))
-        self.chat_window.move(x, y)
+        self.chat_window.move(
+            *overlay_position(
+                anchor_position=(self.x(), self.y()),
+                anchor_size=(self.width(), self.height()),
+                overlay_size=(
+                    self.chat_window.width(),
+                    self.chat_window.height(),
+                ),
+                screen=self._display_rect(geo),
+            )
+        )
 
     def _on_state_changed(self, new_state):
         self._state_started_tick = self.tick

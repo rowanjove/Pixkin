@@ -1,24 +1,46 @@
 import ast
+import copy
 import datetime
 import math
 import platform
 import shutil
 import subprocess
+import time
 import webbrowser
 from pathlib import Path
 from typing import Dict, Any, List, Callable
 from urllib.parse import urlparse
 
+from core.services.tool_permission_service import (
+    ToolPermissionLevel,
+    ToolPermissionService,
+)
+
 
 class ToolRegistry:
     """Tool Calls (Function Calling) 注册与调度中心"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        permission_service: ToolPermissionService | None = None,
+    ):
         self._tools_schema: List[Dict[str, Any]] = []
         self._tool_handlers: Dict[str, Callable] = {}
+        self._tool_permissions = {}
+        self.permission_service = (
+            permission_service or ToolPermissionService()
+        )
         self._register_default_tools()
 
-    def register_tool(self, name: str, description: str, parameters: Dict[str, Any], handler: Callable):
+    def register_tool(
+        self,
+        name: str,
+        description: str,
+        parameters: Dict[str, Any],
+        handler: Callable,
+        permission_level: ToolPermissionLevel = ToolPermissionLevel.READ_ONLY,
+        side_effect: str = "",
+    ):
         """注册一个新的工具"""
         schema = {
             "type": "function",
@@ -30,6 +52,7 @@ class ToolRegistry:
         }
         self._tools_schema.append(schema)
         self._tool_handlers[name] = handler
+        self._tool_permissions[name] = (permission_level, side_effect)
 
     def get_tools_schema(self) -> List[Dict[str, Any]]:
         """获取所有工具的 OpenAI schema 声明"""
@@ -39,11 +62,48 @@ class ToolRegistry:
         """执行调用的工具并返回字符串结果"""
         if name not in self._tool_handlers:
             return f"Error: Tool '{name}' not found."
+        execution_args = copy.deepcopy(args)
+        level, side_effect = self._tool_permissions[name]
+        request, decision = self.permission_service.authorize(
+            name,
+            level,
+            execution_args,
+            side_effect,
+        )
+        started = time.perf_counter()
+        if not decision.allowed:
+            self.permission_service.record(
+                request,
+                decision,
+                result_status="denied",
+                duration_ms=0,
+            )
+            return f"Permission denied for tool '{name}': {decision.reason}"
         try:
             handler = self._tool_handlers[name]
-            result = handler(**args) if args else handler()
+            result = (
+                handler(**execution_args)
+                if execution_args
+                else handler()
+            )
+            self.permission_service.record(
+                request,
+                decision,
+                result_status="success",
+                duration_ms=round(
+                    (time.perf_counter() - started) * 1000
+                ),
+            )
             return str(result)
         except Exception as e:
+            self.permission_service.record(
+                request,
+                decision,
+                result_status="error",
+                duration_ms=round(
+                    (time.perf_counter() - started) * 1000
+                ),
+            )
             return f"Error executing tool '{name}': {str(e)}"
 
     def _register_default_tools(self):
@@ -74,18 +134,20 @@ class ToolRegistry:
         # 工具 3: 打开常见系统应用
         self.register_tool(
             name="open_application",
-            description="在 Windows 系统上打开白名单内的常用应用，例如记事本、计算器、画图或文件资源管理器。",
+            description="在 Windows 系统上打开白名单内的常用应用，例如记事本、计算器、画图或文件资源管理器；执行前需要用户确认。",
             parameters={
                 "type": "object",
                 "properties": {
                     "app_name": {
                         "type": "string",
-                        "description": "要打开的应用名称，如 notepad, calc, cmd 等"
+                        "description": "要打开的应用名称，如 notepad、calc、mspaint 或 explorer"
                     }
                 },
                 "required": ["app_name"]
             },
-            handler=self._tool_open_application
+            handler=self._tool_open_application,
+            permission_level=ToolPermissionLevel.EXTERNAL_ACTION,
+            side_effect="启动本地白名单应用",
         )
 
         self.register_tool(
@@ -113,7 +175,7 @@ class ToolRegistry:
 
         self.register_tool(
             name="open_url",
-            description="使用默认浏览器打开经过校验的 HTTP 或 HTTPS 网页。",
+            description="使用默认浏览器打开经过校验的 HTTP 或 HTTPS 网页；执行前需要用户确认。",
             parameters={
                 "type": "object",
                 "properties": {
@@ -125,6 +187,8 @@ class ToolRegistry:
                 "required": ["url"]
             },
             handler=self._tool_open_url,
+            permission_level=ToolPermissionLevel.EXTERNAL_ACTION,
+            side_effect="在默认浏览器打开外部网页",
         )
 
     def _tool_list_available_tools(self) -> str:
@@ -151,7 +215,6 @@ class ToolRegistry:
             "calc": "calc.exe",
             "calculator": "calc.exe",
             "mspaint": "mspaint.exe",
-            "cmd": "cmd.exe",
             "explorer": "explorer.exe"
         }
         app_key = app_name.lower().strip()

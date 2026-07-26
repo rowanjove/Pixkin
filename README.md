@@ -1,6 +1,6 @@
 # Pixkin
 
-**A tiny AI sidekick with a life of its own.**
+**一只有自己小脾气的 AI 桌面伙伴。**
 
 Pixkin 是面向 Windows 10 / 11 的卡通桌面伙伴。它会随机组合动作、响应点击和拖动、
 吸附屏幕边缘并探头；也能常驻托盘，进行大模型对话、调用经过白名单保护的本地工具，
@@ -102,10 +102,23 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 - 支持 OpenAI-compatible Chat Completions 与流式回复。
 - 支持模型 Tool Calls。
 - 内置安全算式、时间、系统与磁盘信息、HTTP(S) 网页和白名单应用等工具。
+- 打开网页或应用会在主线程逐次确认；可对完全相同的工具与参数记住本次运行决定。
+- 设置中心可查看、导出和清除带容量上限的脱敏工具审计。
 - 每个角色拥有独立的本地会话与上下文，切换角色不会丢失原角色记录。
 - “聊天时光胶囊”支持按角色、按日期查看，并导出 Markdown 或 JSON。
-- 支持开启新话题而保留旧记录，以及清空本次、所选日期或全部历史。
+- 支持开启新话题而保留旧记录，以及清空本次、所选日期、当前角色或全部历史。
+- 历史可选择不保存、保留 7 天、30 天或永久，并支持导出后删除所见。
 - 角色包内的 `system_prompt` 可定义名字、语气和人格。
+- 可控长期记忆只保存逐条确认项，按角色隔离；每次回答可查看实际使用的记忆。
+- 支持快速/均衡/深入预设、停止生成、失败重试、编辑重发，以及延迟/token/费用估算。
+- 模型任务会在发送前检查流式和 Tool Calls 能力。
+
+## 语音与快捷键
+
+- 语音默认关闭；启用后只有按住说话期间访问麦克风，松开后立即停止。
+- 录音只驻留内存，使用独立 HTTPS 转写端点和独立 Windows 凭据。
+- 转写文本先进入输入框，由用户确认后再发送聊天。
+- 支持显示/隐藏、打开聊天、停止生成和麦克风静音四类全局快捷键。
 
 ## 开播监听
 
@@ -113,6 +126,9 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 - 每轮并发查询，慢平台不会阻塞其他直播间。
 - 仅在“未开播 → 开播”状态变化时弹出开播提醒气泡。
 - 可选择程序启动时发现正在直播也提醒。
+- 支持房间分组、跨午夜免打扰、静默结束后补提醒和可选重复提醒。
+- 平台凭据按房间隔离保存；配置中的明文 cookie 不会被内置 Provider 使用。
+- 外部平台适配器必须显式启用并通过 URL 安全和能力契约。
 
 实现结构参考了
 [chenfan0/fideo-live-record](https://github.com/chenfan0/fideo-live-record)
@@ -123,8 +139,12 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 - 角色包、设置、日志保存在 `%LOCALAPPDATA%\Pixkin`。
 - 聊天历史保存在本机 `%LOCALAPPDATA%\Pixkin\chat-history.sqlite3`，不会自动上传。
 - 老版 `%LOCALAPPDATA%\DesktopPet` 数据会在首次运行时迁移。
-- API Key 优先保存在 Windows Credential Manager。
-- 新增会删除文件、发送消息或修改系统的工具时，应增加逐次确认与审计记录。
+- API Key 只持久化到 Windows Credential Manager，也可选择仅本次运行保存在内存。
+- 首次发送给模型前会展示目标接口、发送范围和本地保存说明。
+- 日志、聊天数据库、工具审计和问题包会脱敏常见密钥格式。
+- 官方角色包由内置 SHA-256 清单验证；第三方包安装前显示作者、许可、资源数和指纹。
+- 独立角色检查器可在不安装时预览、检查兼容性和完整指纹；第三方作者声明不自动受信。
+- L2 状态修改和 L3 高风险工具默认禁用。
 - 当前构建目标为 Windows 10 / 11 x64。
 
 ## 源码运行
@@ -138,6 +158,23 @@ py -3.11 main.py
 
 ## 测试
 
+安装锁定的开发与构建依赖：
+
+```powershell
+py -3.11 -m pip install --require-hashes -r requirements-lock.txt
+```
+
+推荐运行统一质量门禁：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_quality.ps1
+```
+
+该脚本会依次检查版本元数据、源码编译、Ruff、Pyright、全量测试和分支覆盖率；
+当前覆盖率门槛为 70%。
+
+只运行测试时：
+
 ```powershell
 $env:QT_QPA_PLATFORM='offscreen'
 py -3.11 -m pytest -q
@@ -149,13 +186,35 @@ py -3.11 -m pytest -q
 py -3.11 scripts\generate_version_info.py
 ```
 
-CI 会检查 Windows 版本资源是否与应用版本一致，并在 Windows 环境完成测试和
-PyInstaller 文件夹版构建冒烟。图片、视频、图集和角色 ZIP 使用 Git LFS 管理。
+CI 会使用带哈希的锁定依赖，检查 Windows 版本资源、Ruff、Pyright、测试覆盖率和
+依赖漏洞，生成 SBOM，并在隔离用户目录中完成 PyInstaller 文件夹版的自动启动和
+正常退出冒烟。兼容矩阵覆盖 Windows Server 2022/2025 与 100%/200% Qt 缩放，
+同时验证负坐标副屏的位置恢复和浮层边界；Windows 10/11 实机显示器热插拔等场景
+仍按发布清单人工验收。
+图片、视频、图集和角色 ZIP 使用 Git LFS 管理。
+
+架构解耦的依赖规则、已迁移模块和回滚边界见
+[`docs/M8_ARCHITECTURE.md`](docs/M8_ARCHITECTURE.md)。
+安全、隐私、工具授权和角色包信任边界见
+[`docs/M9_SECURITY.md`](docs/M9_SECURITY.md)。
+稳定性、诊断、数据恢复和性能基线见
+[`docs/M10_STABILITY.md`](docs/M10_STABILITY.md)。
+安装、签名更新、回滚和发布密钥运维见
+[`docs/M11_INSTALL_UPDATE.md`](docs/M11_INSTALL_UPDATE.md)。
+可控记忆、语音快捷键、角色生态、AI 体验和直播提醒扩展见
+[`docs/M12_PRODUCT_CAPABILITIES.md`](docs/M12_PRODUCT_CAPABILITIES.md)。
+
+修改顶层依赖后重新生成锁定文件：
+
+```powershell
+py -3.11 -m piptools compile --generate-hashes --strip-extras `
+  --output-file requirements-lock.txt requirements-build.txt
+```
 
 ## 构建 Windows 发行版
 
 ```powershell
-py -3.11 -m pip install -r requirements-build.txt
+py -3.11 -m pip install --require-hashes -r requirements-lock.txt
 powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 ```
 
@@ -165,8 +224,11 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 release/
 ├─ Pixkin-1.3.0-win64.zip
 ├─ Pixkin-Portable-1.3.0.exe
+├─ Pixkin-Setup-1.3.0.exe
+├─ update-stable.json（正式 Release）
 ├─ 椰子.zip
 ├─ CHARACTER_PACKAGE_SPEC.md
+├─ SBOM.cdx.json
 └─ SHA256SUMS.txt
 ```
 

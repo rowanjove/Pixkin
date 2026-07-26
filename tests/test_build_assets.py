@@ -14,6 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseAssetTests(unittest.TestCase):
+    def test_official_hash_manifest_is_bundled_by_both_specs(self):
+        for name in ("desktop_pet.spec", "desktop_pet_portable.spec"):
+            spec = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("official-sha256.json", spec)
+            self.assertIn("update-public-key.pem", spec)
+
     def test_bundled_characters_use_v2_transparent_atlases(self):
         for package_id in ("shanshan", "linlin", "pip"):
             archive_path = ROOT / "character-packs" / f"{package_id}.zip"
@@ -123,8 +129,22 @@ class ReleaseAssetTests(unittest.TestCase):
         self.assertIn("验收重建后的发布资产", text)
         self.assertLess(
             text.index("-m scripts.create_sample_pack"),
-            text.index("tests\\test_build_assets.py"),
+            text.index("scripts\\run_quality.ps1"),
         )
+        self.assertIn("-m pip_audit", text)
+        self.assertIn("SBOM.cdx.json", text)
+
+    def test_ci_has_explicit_windows_and_dpi_compatibility_matrix(self):
+        text = (
+            ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("windows-2022", text)
+        self.assertIn("windows-2025", text)
+        self.assertIn('scale: "1.0"', text)
+        self.assertIn('scale: "2.0"', text)
+        self.assertIn("QT_SCALE_FACTOR", text)
+        self.assertIn("tests/test_display_layout.py", text)
+        self.assertIn("tests/test_ui.py", text)
 
 
 if __name__ == "__main__":

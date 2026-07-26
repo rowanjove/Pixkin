@@ -9,7 +9,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, cast
 
 from PIL import Image, ImageDraw
 
@@ -109,7 +109,11 @@ class PetGenerationQa:
             flat_data = getattr(
                 image, "get_flattened_data", image.getdata
             )
-            for red, green, blue, opacity in flat_data():
+            pixels = cast(
+                Iterable[tuple[int, int, int, int]],
+                flat_data(),
+            )
+            for red, green, blue, opacity in pixels:
                 if opacity <= 32:
                     continue
                 opaque += 1

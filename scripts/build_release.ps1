@@ -26,10 +26,10 @@ New-Item -ItemType Directory -Path $ReleasePath | Out-Null
 
 Push-Location $ProjectRoot
 try {
-    $Version = (
-        py -3.11 -c "from core.version import VERSION; print(VERSION)"
-    ).Trim()
+    $VersionOutput = py -3.11 -c "from core.version import VERSION; print(VERSION)"
     Assert-LastExitCode "读取应用版本"
+    $Version = [string]($VersionOutput | Select-Object -Last 1)
+    $Version = $Version.Trim()
     if ($Version -notmatch '^\d+\.\d+\.\d+$') {
         throw "无法读取有效的 Pixkin 版本号：$Version"
     }
@@ -38,23 +38,74 @@ try {
     py -3.11 -m scripts.create_sample_pack
     Assert-LastExitCode "重建内置角色包"
 
-    $PreviousQtPlatform = $env:QT_QPA_PLATFORM
-    try {
-        $env:QT_QPA_PLATFORM = "offscreen"
-        py -3.11 -m pytest -q `
-            tests\test_build_assets.py `
-            tests\test_character_package.py `
-            tests\test_versioning.py
-        Assert-LastExitCode "验收重建后的发布资产"
-    }
-    finally {
-        $env:QT_QPA_PLATFORM = $PreviousQtPlatform
-    }
+    powershell -NoProfile -ExecutionPolicy Bypass `
+        -File scripts\run_quality.ps1
+    Assert-LastExitCode "验收重建后的发布资产与质量门禁"
 
     py -3.11 -m PyInstaller --noconfirm desktop_pet.spec
     Assert-LastExitCode "构建文件夹版"
     py -3.11 -m PyInstaller --noconfirm desktop_pet_portable.spec
     Assert-LastExitCode "构建便携版"
+    py -3.11 scripts\smoke_release.py `
+        (Join-Path $DistPath "Pixkin\Pixkin.exe")
+    Assert-LastExitCode "文件夹版启动退出冒烟"
+    py -3.11 scripts\smoke_release.py `
+        (Join-Path $DistPath "Pixkin-Portable-$Version.exe")
+    Assert-LastExitCode "便携版启动退出冒烟"
+
+    $InstallerArguments = @{}
+    $TemporaryPrivateKey = $null
+    try {
+        if ($env:PIXKIN_UPDATE_PRIVATE_KEY_PATH) {
+            $InstallerArguments.PrivateKeyPath = `
+                $env:PIXKIN_UPDATE_PRIVATE_KEY_PATH
+        }
+        elseif ($env:PIXKIN_UPDATE_PRIVATE_KEY_B64) {
+            $TemporaryPrivateKey = Join-Path `
+                ([System.IO.Path]::GetTempPath()) `
+                ("pixkin-update-key-" + [guid]::NewGuid().ToString("N") + ".pem")
+            [System.IO.File]::WriteAllBytes(
+                $TemporaryPrivateKey,
+                [Convert]::FromBase64String(
+                    $env:PIXKIN_UPDATE_PRIVATE_KEY_B64
+                )
+            )
+            $InstallerArguments.PrivateKeyPath = $TemporaryPrivateKey
+        }
+        if ($InstallerArguments.ContainsKey("PrivateKeyPath")) {
+            if (
+                -not $env:PIXKIN_UPDATE_BASE_URL -or
+                -not $env:PIXKIN_UPDATE_RELEASE_NOTES_URL
+            ) {
+                throw "更新清单签名需要 PIXKIN_UPDATE_BASE_URL 和 PIXKIN_UPDATE_RELEASE_NOTES_URL"
+            }
+            $InstallerArguments.BaseUrl = $env:PIXKIN_UPDATE_BASE_URL
+            $InstallerArguments.ReleaseNotesUrl = `
+                $env:PIXKIN_UPDATE_RELEASE_NOTES_URL
+            $InstallerArguments.Channel = if (
+                $env:PIXKIN_UPDATE_CHANNEL
+            ) { $env:PIXKIN_UPDATE_CHANNEL } else { "stable" }
+        }
+        if ($env:PIXKIN_UPDATE_MANIFEST_URL) {
+            $InstallerArguments.StableManifestUrl = `
+                $env:PIXKIN_UPDATE_MANIFEST_URL
+        }
+        if ($env:PIXKIN_BETA_UPDATE_MANIFEST_URL) {
+            $InstallerArguments.BetaManifestUrl = `
+                $env:PIXKIN_BETA_UPDATE_MANIFEST_URL
+        }
+        & (Join-Path $ProjectRoot "scripts\build_installer.ps1") `
+            @InstallerArguments
+        Assert-LastExitCode "构建 Inno Setup 安装器"
+    }
+    finally {
+        if (
+            $TemporaryPrivateKey -and
+            (Test-Path -LiteralPath $TemporaryPrivateKey)
+        ) {
+            Remove-Item -LiteralPath $TemporaryPrivateKey -Force
+        }
+    }
 
     $ImportPackPath = Join-Path $DistPath "Pixkin\可导入角色包"
     New-Item -ItemType Directory -Path $ImportPackPath | Out-Null
@@ -67,6 +118,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $ProjectRoot "CHARACTER_PACKAGE_SPEC.md") -Destination $ReleasePath
     Copy-Item -LiteralPath (Join-Path $ProjectRoot "character-packs\yeye.zip") `
         -Destination (Join-Path $ReleasePath "椰子.zip")
+    py -3.11 -m pip_audit -r requirements-lock.txt `
+        --format cyclonedx-json `
+        --output (Join-Path $ReleasePath "SBOM.cdx.json")
+    Assert-LastExitCode "生成依赖审计与 SBOM"
 
     $Hashes = Get-ChildItem -LiteralPath $ReleasePath -File | Get-FileHash -Algorithm SHA256
     $Hashes | ForEach-Object {
