@@ -131,7 +131,7 @@ def friendly_day_label(day: str, *, today: date | None = None) -> str:
         return "今天"
     if (current_day - value).days == 1:
         return "昨天"
-    return value.strftime("%Y年%m月%d日")
+    return f"{value.year:04d}年{value.month:02d}月{value.day:02d}日"
 
 
 def render_transcript_html(messages: Sequence[Mapping[str, Any]]) -> str:
