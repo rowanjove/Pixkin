@@ -1,5 +1,7 @@
 """从统一的 v2 资产打包内置角色和可手动导入角色。"""
 
+import hashlib
+import json
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -12,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SOURCE_ROOT = ROOT / "character-packs" / "v2-built"
 BUILTIN_PACKAGES = ("shanshan", "linlin", "pip")
 IMPORT_ONLY_PACKAGES = ("yeye",)
+OFFICIAL_HASH_MANIFEST = ROOT / "character-packs" / "official-sha256.json"
+CATALOG_FILE = ROOT / "character-packs" / "catalog.json"
+ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 def declared_package_files(source: Path):
@@ -59,14 +64,16 @@ def build_package(package_id: str) -> Path:
     package_files = declared_package_files(source)
     temporary = output.with_name(f".{package_id}.tmp.zip")
     try:
-        with zipfile.ZipFile(
-            temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=9
-        ) as archive:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as archive:
             for relative in package_files:
                 path = source / relative
                 if not path.is_file():
                     raise FileNotFoundError(f"v2 角色缺少资源：{path}")
-                archive.write(path, relative.as_posix())
+                info = zipfile.ZipInfo(relative.as_posix(), ZIP_TIMESTAMP)
+                info.create_system = 3
+                info.external_attr = 0o100644 << 16
+                info.compress_type = zipfile.ZIP_STORED
+                archive.writestr(info, path.read_bytes())
         validator = CharacterPackageManager.__new__(
             CharacterPackageManager
         )
@@ -78,9 +85,44 @@ def build_package(package_id: str) -> Path:
     return output
 
 
+def update_official_metadata(outputs: dict[str, Path]) -> None:
+    digests = {
+        f"{package_id}.zip": hashlib.sha256(path.read_bytes()).hexdigest()
+        for package_id, path in outputs.items()
+    }
+    OFFICIAL_HASH_MANIFEST.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "archives": digests,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    catalog = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    for entry in catalog.get("entries", []):
+        package_id = str(entry.get("id") or "")
+        archive_name = f"{package_id}.zip"
+        if package_id in BUILTIN_PACKAGES:
+            entry["sha256"] = digests[archive_name]
+    CATALOG_FILE.write_text(
+        json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def main():
+    outputs = {}
     for package_id in (*BUILTIN_PACKAGES, *IMPORT_ONLY_PACKAGES):
-        print(build_package(package_id))
+        outputs[package_id] = build_package(package_id)
+        print(outputs[package_id])
+    update_official_metadata(outputs)
     return 0
 
 
