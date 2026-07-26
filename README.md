@@ -227,7 +227,7 @@ release/
 ├─ Pixkin-Setup-1.3.0.exe
 ├─ update-stable.json（正式 Release）
 ├─ shanshan.zip、linlin.zip、pip.zip
-├─ 椰子.zip
+├─ yeye.zip（椰子角色包）
 ├─ CHARACTER_PACKAGE_SPEC.md
 ├─ SBOM.cdx.json
 └─ SHA256SUMS.txt

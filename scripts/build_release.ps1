@@ -117,7 +117,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $DistPath "Pixkin-Portable-$Version.exe") -Destination $ReleasePath
     Copy-Item -LiteralPath (Join-Path $ProjectRoot "CHARACTER_PACKAGE_SPEC.md") -Destination $ReleasePath
     Copy-Item -LiteralPath (Join-Path $ProjectRoot "character-packs\yeye.zip") `
-        -Destination (Join-Path $ReleasePath "椰子.zip")
+        -Destination (Join-Path $ReleasePath "yeye.zip")
     foreach ($Name in @("shanshan.zip", "linlin.zip", "pip.zip")) {
         Copy-Item -LiteralPath `
             (Join-Path $ProjectRoot "character-packs\$Name") `

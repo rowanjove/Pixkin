@@ -134,6 +134,7 @@ class ReleaseAssetTests(unittest.TestCase):
         self.assertIn("-m pip_audit", text)
         self.assertIn("SBOM.cdx.json", text)
         self.assertIn('"shanshan.zip", "linlin.zip", "pip.zip"', text)
+        self.assertIn('"yeye.zip"', text)
 
     def test_official_archives_use_reproducible_zip_metadata(self):
         expected_timestamp = (1980, 1, 1, 0, 0, 0)
