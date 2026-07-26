@@ -87,7 +87,7 @@ def main() -> int:
         return 0
 
     OUTPUT_FILE.write_text(expected, encoding="utf-8", newline="\n")
-    print(f"已生成 {OUTPUT_FILE.name}（{application_version()}）")
+    print(f"{OUTPUT_FILE.name} ({application_version()})")
     return 0
 
 
