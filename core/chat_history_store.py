@@ -1,15 +1,25 @@
 import json
+import os
 import sqlite3
+import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.paths import user_data_dir
+from core.storage.migrations import (
+    CHAT_SCHEMA_VERSION,
+    migrate_chat_database,
+)
 
 
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+class ChatDatabaseCorruptError(RuntimeError):
+    """The chat database failed SQLite integrity checks."""
 
 
 class ChatHistoryStore:
@@ -38,38 +48,112 @@ class ChatHistoryStore:
             connection.close()
 
     def _initialize(self):
-        with self._connection() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id TEXT PRIMARY KEY,
-                    character_id TEXT NOT NULL,
-                    character_name TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    is_active INTEGER NOT NULL DEFAULT 1
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS one_active_session_per_character
-                ON sessions(character_id)
-                WHERE is_active = 1;
-                CREATE INDEX IF NOT EXISTS sessions_by_character
-                ON sessions(character_id, updated_at DESC);
+        existed = (
+            self.database_path.is_file()
+            and self.database_path.stat().st_size > 0
+        )
+        connection = self._connect()
+        try:
+            if existed:
+                integrity = connection.execute(
+                    "PRAGMA quick_check"
+                ).fetchone()
+                if not integrity or str(integrity[0]).lower() != "ok":
+                    raise ChatDatabaseCorruptError(
+                        "聊天数据库完整性检查失败"
+                    )
+                version = int(
+                    connection.execute(
+                        "PRAGMA user_version"
+                    ).fetchone()[0]
+                )
+                if version < CHAT_SCHEMA_VERSION:
+                    self._backup_connection(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            migrate_chat_database(connection)
+            connection.commit()
+        except ChatDatabaseCorruptError:
+            try:
+                connection.rollback()
+            except sqlite3.DatabaseError:
+                pass
+            raise
+        except sqlite3.DatabaseError as exc:
+            try:
+                connection.rollback()
+            except sqlite3.DatabaseError:
+                pass
+            raise ChatDatabaseCorruptError(
+                "聊天数据库无法读取或已经损坏"
+            ) from exc
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(session_id) REFERENCES sessions(id)
-                        ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS messages_by_session
-                ON messages(session_id, id);
-                CREATE INDEX IF NOT EXISTS messages_by_date
-                ON messages(created_at);
-                """
+    def _backup_connection(self, connection) -> Path:
+        backup_root = self.database_path.parent / "backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        destination = (
+            backup_root
+            / (
+                "chat-pre-migration-"
+                + datetime.now().strftime("%Y%m%d-%H%M%S")
+                + f"-{uuid.uuid4().hex[:8]}.sqlite3"
+            )
+        )
+        backup = sqlite3.connect(str(destination))
+        try:
+            connection.backup(backup)
+        finally:
+            backup.close()
+        return destination
+
+    def check_integrity(self) -> tuple[bool, str]:
+        try:
+            with self._connection() as connection:
+                rows = connection.execute(
+                    "PRAGMA integrity_check"
+                ).fetchall()
+        except sqlite3.DatabaseError as exc:
+            return False, str(exc)
+        messages = [str(row[0]) for row in rows]
+        healthy = messages == ["ok"]
+        return healthy, "ok" if healthy else "\n".join(messages[:20])
+
+    def backup(self, destination: str | Path) -> Path:
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary)
+        temporary_path.unlink(missing_ok=True)
+        try:
+            source = self._connect()
+            backup = sqlite3.connect(str(temporary_path))
+            try:
+                source.backup(backup)
+            finally:
+                backup.close()
+                source.close()
+            os.replace(temporary_path, target)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+        return target
+
+    @property
+    def schema_version(self) -> int:
+        with self._connection() as connection:
+            return int(
+                connection.execute(
+                    "PRAGMA user_version"
+                ).fetchone()[0]
             )
 
     def get_or_create_active_session(
@@ -256,6 +340,23 @@ class ChatHistoryStore:
             )
         return count
 
+    def delete_character(self, character_id: str) -> int:
+        with self._connection() as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE session_id IN (
+                    SELECT id FROM sessions WHERE character_id = ?
+                )
+                """,
+                (str(character_id),),
+            ).fetchone()[0]
+            connection.execute(
+                "DELETE FROM sessions WHERE character_id = ?",
+                (str(character_id),),
+            )
+        return count
+
     def delete_date(self, day: str, character_id=None) -> int:
         conditions = ["substr(created_at, 1, 10) = ?"]
         values = [str(day)]
@@ -286,3 +387,30 @@ class ChatHistoryStore:
             ).fetchone()[0]
             connection.execute("DELETE FROM sessions")
         return count
+
+    def prune_older_than(
+        self,
+        days: int,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        retention_days = max(0, int(days))
+        reference = now or datetime.now().astimezone()
+        cutoff = (reference - timedelta(days=retention_days)).isoformat(
+            timespec="milliseconds"
+        )
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM messages WHERE created_at < ?",
+                (cutoff,),
+            )
+            connection.execute(
+                """
+                DELETE FROM sessions
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM messages
+                    WHERE messages.session_id = sessions.id
+                ) AND is_active = 0
+                """
+            )
+        return max(0, cursor.rowcount)

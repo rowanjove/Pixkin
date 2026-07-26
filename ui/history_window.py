@@ -1,5 +1,4 @@
 import html
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from core.services.chat_export_service import ChatExportService
 from ui.theme import resolved_theme
 
 
@@ -36,6 +36,7 @@ class HistoryWindow(QDialog):
         character_name: str,
         session_id: str,
         config_manager=None,
+        export_service: ChatExportService = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -44,6 +45,7 @@ class HistoryWindow(QDialog):
         self.character_name = character_name
         self.session_id = session_id
         self.config_manager = config_manager
+        self.export_service = export_service or ChatExportService()
         self.setWindowTitle("Pixkin · 聊天时光胶囊")
         self.setMinimumSize(760, 560)
         self.resize(820, 620)
@@ -86,10 +88,16 @@ class HistoryWindow(QDialog):
         export = QPushButton("导出所见记录")
         export.setObjectName("secondary")
         export.clicked.connect(self._export_visible)
+        export_delete = QPushButton("导出后删除所见")
+        export_delete.setObjectName("danger")
+        export_delete.clicked.connect(
+            lambda: self._export_visible(delete_after=True)
+        )
         toolbar.addWidget(self.scope_combo)
         toolbar.addStretch()
         toolbar.addWidget(new_topic)
         toolbar.addWidget(export)
+        toolbar.addWidget(export_delete)
         root.addLayout(toolbar)
 
         content = QHBoxLayout()
@@ -134,6 +142,9 @@ class HistoryWindow(QDialog):
         self.clear_day_btn = QPushButton("清空所选日期")
         self.clear_day_btn.setObjectName("danger")
         self.clear_day_btn.clicked.connect(self._clear_day)
+        self.clear_character_btn = QPushButton("清空当前角色")
+        self.clear_character_btn.setObjectName("danger")
+        self.clear_character_btn.clicked.connect(self._clear_character)
         clear_all = QPushButton("清空全部历史")
         clear_all.setObjectName("danger")
         clear_all.clicked.connect(self._clear_all)
@@ -142,6 +153,7 @@ class HistoryWindow(QDialog):
         close.clicked.connect(self.accept)
         danger_row.addWidget(self.clear_session_btn)
         danger_row.addWidget(self.clear_day_btn)
+        danger_row.addWidget(self.clear_character_btn)
         danger_row.addWidget(clear_all)
         danger_row.addStretch()
         danger_row.addWidget(close)
@@ -249,6 +261,9 @@ class HistoryWindow(QDialog):
         self.date_list.blockSignals(False)
         self.date_list.setCurrentRow(target_row)
         self._render_selected()
+        self.clear_character_btn.setEnabled(
+            self.scope_combo.currentData() == "character"
+        )
 
     def _visible_messages(self):
         return self.store.list_messages(
@@ -290,7 +305,7 @@ class HistoryWindow(QDialog):
             )
         self.transcript.setHtml("".join(blocks))
 
-    def _export_visible(self):
+    def _export_visible(self, _checked=False, *, delete_after=False):
         messages = self._visible_messages()
         if not messages:
             QMessageBox.information(
@@ -306,33 +321,44 @@ class HistoryWindow(QDialog):
         )
         if not destination:
             return
-        target = Path(destination)
         try:
-            if "JSON" in selected_filter or target.suffix.lower() == ".json":
-                target.write_text(
-                    json.dumps(messages, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-            else:
-                lines = [f"# Pixkin 聊天记录 · {day}", ""]
-                for item in messages:
-                    who = ROLE_LABELS.get(item["role"], item["role"])
-                    if item["role"] == "assistant":
-                        who = item["character_name"]
-                    timestamp = item["created_at"].replace("T", " ")[:19]
-                    lines.extend([
-                        f"## {timestamp} · {who}",
-                        "",
-                        item["content"],
-                        "",
-                    ])
-                target.write_text("\n".join(lines), encoding="utf-8")
+            target = self.export_service.export(
+                messages,
+                destination,
+                day_label=day,
+                json_format=(
+                    "JSON" in selected_filter
+                    or Path(destination).suffix.lower() == ".json"
+                ),
+            )
         except OSError as exc:
             QMessageBox.warning(self, "导出失败", str(exc))
             return
         QMessageBox.information(
             self, "导出完成", f"聊天记录已保存到：\n{target}"
         )
+        if not delete_after:
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除已导出的记录",
+            "导出已经完成。确定永久删除当前筛选范围内的消息吗？",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        character_id = self._selected_character_id()
+        day = self._selected_day()
+        if day:
+            self.store.delete_date(day, character_id)
+        elif character_id:
+            self.store.delete_character(character_id)
+        else:
+            self.store.clear_all()
+        self.history_changed.emit()
+        self.refresh()
 
     def _clear_session(self):
         answer = QMessageBox.question(
@@ -365,6 +391,23 @@ class HistoryWindow(QDialog):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.store.delete_date(day, self._selected_character_id())
+        self.history_changed.emit()
+        self.refresh()
+
+    def _clear_character(self):
+        if self.scope_combo.currentData() != "character":
+            return
+        answer = QMessageBox.question(
+            self,
+            "清空当前角色",
+            f"确定永久删除角色“{self.character_name}”的全部聊天历史吗？",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.store.delete_character(self.character_id)
         self.history_changed.emit()
         self.refresh()
 

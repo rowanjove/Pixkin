@@ -197,6 +197,21 @@ class PetAnimator(QObject):
 
     def configure_behavior(self, behavior):
         behavior = behavior if isinstance(behavior, dict) else {}
+        self.idle_interval_seconds = (7.0, 14.0)
+        self.ambient_weights = {
+            PetState.BLINK: 5.0,
+            PetState.LOOK_AROUND: 2.0,
+            PetState.NOD: 1.0,
+            PetState.STRETCH: 0.8,
+            PetState.WAVE: 0.6,
+            PetState.SLEEP: 0.35,
+        }
+        self.cooldown_seconds = {
+            PetState.WAVE: 45.0,
+            PetState.STRETCH: 60.0,
+            PetState.SLEEP: 90.0,
+        }
+        self.speed_multiplier = 1.0
         interval = behavior.get("idle_interval_seconds", self.idle_interval_seconds)
         if isinstance(interval, (list, tuple)) and len(interval) == 2:
             try:
@@ -220,8 +235,7 @@ class PetAnimator(QObject):
                 provided_weight_states.add(state)
                 if value:
                     parsed[state] = value
-            if parsed:
-                self.ambient_weights = parsed
+            self.ambient_weights = parsed
 
         temperament = str(
             behavior.get("motion_temperament", "")

@@ -14,7 +14,8 @@ from PyQt6.QtCore import QCoreApplication, Qt, QPointF, QEvent, QObject, QRect
 from PyQt6.QtGui import QMouseEvent, QRegion
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QLabel, QListWidget, QMessageBox, QPushButton
+    QApplication, QDialog, QLabel, QListWidget, QMenu, QMessageBox,
+    QPushButton, QScrollArea,
 )
 
 from core.character_package import (
@@ -25,6 +26,7 @@ from core.config import ConfigManager
 from core.pet_animator import PetState
 from core.pet_generation_run import PetGenerationRunStore
 from core.secrets import SecretStore
+from core.services.chat_service import ChatSessionService
 from core.tool_registry import ToolRegistry
 from ui.chat_window import BubbleShell, ChatBubbleWindow
 from ui.history_window import HistoryWindow
@@ -33,6 +35,37 @@ from ui.pet_lab_window import PetLabWindow
 from ui.pet_window import PetWindow
 from ui.settings_window import SettingsWindow
 from main import BUILTIN_CHARACTER_ARCHIVES, DesktopPetApp
+
+
+def advance_to_final_review(store, run_id, artifacts=None):
+    store.update_stage(run_id, "action_generation", status="running")
+    store.update_stage(
+        run_id,
+        "qa_complete",
+        status="running",
+        artifacts={
+            "qa_contact_sheet": "qa-contact-sheet.png",
+            "qa_report": "qa-report.json",
+        },
+    )
+    store.update_stage(
+        run_id,
+        "animation_qa_complete",
+        status="running",
+        artifacts={
+            "animation_qa_report": "animation-qa.json",
+            "animation_previews": {"idle": "idle.gif"},
+        },
+    )
+    store.update_stage(run_id, "packaging", status="running")
+    final_artifacts = {"package": "pet.zip"}
+    final_artifacts.update(artifacts or {})
+    return store.update_stage(
+        run_id,
+        "final_review",
+        status="needs_review",
+        artifacts=final_artifacts,
+    )
 
 
 class UiSmokeTests(unittest.TestCase):
@@ -173,18 +206,32 @@ class UiSmokeTests(unittest.TestCase):
                         ),
                     ),
                 )
+                scale_x = rendered.width() / pet.width()
+                scale_y = rendered.height() / pet.height()
+                reveal_x = round(reveal * scale_x)
+                reveal_y = round(reveal * scale_y)
                 if side == "left":
                     visible = QRect(
-                        pet.width() - reveal, 0, reveal, pet.height()
+                        rendered.width() - reveal_x,
+                        0,
+                        reveal_x,
+                        rendered.height(),
                     )
                 elif side == "right":
-                    visible = QRect(0, 0, reveal, pet.height())
+                    visible = QRect(
+                        0, 0, reveal_x, rendered.height()
+                    )
                 elif side == "top":
                     visible = QRect(
-                        0, pet.height() - reveal, pet.width(), reveal
+                        0,
+                        rendered.height() - reveal_y,
+                        rendered.width(),
+                        reveal_y,
                     )
                 else:
-                    visible = QRect(0, 0, pet.width(), reveal)
+                    visible = QRect(
+                        0, 0, rendered.width(), reveal_y
+                    )
                 subject = QRegion(rendered.mask()).boundingRect()
                 self.assertFalse(subject.isEmpty())
                 self.assertTrue(
@@ -224,13 +271,15 @@ class UiSmokeTests(unittest.TestCase):
             exit_subject = QRegion(exit_render.mask()).boundingRect()
             exit_frame = pet._current_package_frame("edge_exit_right")
             _scaled, expected_subject = pet._scaled_edge_art(exit_frame)
+            exit_scale_x = exit_render.width() / pet.width()
+            exit_scale_y = exit_render.height() / pet.height()
             self.assertEqual(
                 exit_subject.width(),
-                expected_subject.width(),
+                round(expected_subject.width() * exit_scale_x),
             )
             self.assertEqual(
                 exit_subject.height(),
-                expected_subject.height(),
+                round(expected_subject.height() * exit_scale_y),
             )
 
             pet.close()
@@ -462,6 +511,34 @@ class UiSmokeTests(unittest.TestCase):
         self.assertTrue(chat.input_field.hasFocus())
         chat.close()
 
+    def test_chat_retry_control_is_explicit_and_reuses_context(self):
+        chat = ChatBubbleWindow()
+        retried = []
+        chat.retry_requested.connect(lambda: retried.append(True))
+
+        chat.set_retry_available(True)
+        chat.retry_btn.click()
+
+        self.assertEqual(retried, [True])
+        chat.set_retry_available(False)
+        self.assertTrue(chat.retry_btn.isHidden())
+        chat.close()
+
+        controller = DesktopPetApp.__new__(DesktopPetApp)
+        controller.ai_worker = None
+        controller._last_user_text = "上一条"
+        controller.pet_window = SimpleNamespace(
+            chat_window=MagicMock()
+        )
+        controller._start_ai_response = MagicMock()
+
+        controller._retry_last_message()
+
+        controller._start_ai_response.assert_called_once_with()
+        controller.pet_window.chat_window.set_retry_available.assert_called_once_with(
+            False
+        )
+
     def test_tool_menu_reflects_registered_capabilities(self):
         registry = ToolRegistry()
         chat = ChatBubbleWindow()
@@ -496,6 +573,9 @@ class UiSmokeTests(unittest.TestCase):
             controller.chat_store = ChatHistoryStore(
                 Path(directory) / "history.sqlite3"
             )
+            controller.chat_session = ChatSessionService(
+                controller.chat_store
+            )
             controller.pet_window = SimpleNamespace(
                 chat_window=ChatBubbleWindow()
             )
@@ -510,13 +590,13 @@ class UiSmokeTests(unittest.TestCase):
             controller._store_message("user", "只和山山说的话")
             controller._reload_current_chat()
             controller._activate_chat_for_package(linlin)
-            self.assertEqual(controller.chat_history_list, [])
+            self.assertEqual(controller.chat_session.context(), [])
             controller._store_message("user", "只和凛凛说的话")
             controller._reload_current_chat()
 
             controller._activate_chat_for_package(shanshan)
             self.assertEqual(
-                controller.chat_history_list,
+                controller.chat_session.context(),
                 [{"role": "user", "content": "只和山山说的话"}],
             )
             self.assertEqual(
@@ -579,10 +659,14 @@ class UiSmokeTests(unittest.TestCase):
             controller.chat_store = ChatHistoryStore(
                 Path(directory) / "history.sqlite3"
             )
+            controller.chat_session = ChatSessionService(
+                controller.chat_store
+            )
             controller.active_character_id = "shanshan"
             controller.active_character_name = "山山"
-            controller.current_session_id = (
-                controller.chat_store.create_session("shanshan", "山山")
+            controller.chat_session.activate_character(
+                "shanshan",
+                "山山",
             )
             controller._history_window = None
 
@@ -626,6 +710,29 @@ class UiSmokeTests(unittest.TestCase):
             row.findChild(QLabel, "alertTitle").text(), "今晚一起画画"
         )
         chat.close()
+
+    def test_live_health_menu_exposes_trust_failures_and_backoff(self):
+        controller = DesktopPetApp.__new__(DesktopPetApp)
+        controller._room_states = {}
+        controller.live_status_menu = QMenu()
+        state = SimpleNamespace(
+            room_key="bilibili:42",
+            platform="bilibili",
+            is_live=True,
+            title="可信标题",
+            error="temporary",
+            consecutive_failures=3,
+            retry_after_seconds=120,
+            last_success_wall_time=time.time(),
+        )
+
+        controller._on_room_health_changed(state)
+
+        label = controller.live_status_menu.actions()[0].text()
+        self.assertIn("检测失败", label)
+        self.assertIn("连续失败 3", label)
+        self.assertIn("120s 后重试", label)
+        controller.live_status_menu.close()
 
     def test_chat_inserts_date_dividers_for_loaded_history(self):
         chat = ChatBubbleWindow()
@@ -676,6 +783,96 @@ class UiSmokeTests(unittest.TestCase):
         chat.complete_stream()
         self.assertIn("第29段", chat.chat_history.toPlainText())
         chat.close()
+
+    def test_stream_completion_keeps_row_and_scroll_position(self):
+        chat = ChatBubbleWindow()
+        chat.append_message(
+            "assistant",
+            "\n".join(f"历史消息 {index}" for index in range(50)),
+        )
+        chat.show()
+        self.app.processEvents()
+        chat.start_assistant_message()
+        chat.append_chunk("最终回答")
+        QTest.qWait(30)
+        self.app.processEvents()
+        stream_row = chat._stream_row
+
+        with patch.object(chat, "_render_messages") as render:
+            chat.complete_stream({
+                "chat_metrics": {
+                    "latency_ms": 1200,
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "estimated_cost": 0.0,
+                }
+            })
+            self.app.processEvents()
+
+        bar = chat.scroll.verticalScrollBar()
+        render.assert_not_called()
+        self.assertIn(stream_row, chat._message_rows)
+        self.assertEqual(bar.value(), bar.maximum())
+        chat.close()
+
+    def test_plus_menu_uses_configured_gameplay_extensions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(str(Path(directory) / "config.json"))
+            config.update_section("extensions", {
+                "gameplay": [
+                    {
+                        "id": "custom-game",
+                        "name": "我的自定义玩法",
+                        "icon": "🎯",
+                        "prompt": "开始自定义玩法",
+                        "enabled": True,
+                    }
+                ],
+                "enabled_plugins": [],
+            })
+            chat = ChatBubbleWindow(config)
+            menu = chat._build_tool_menu()
+
+            self.assertIn(
+                "🎯 我的自定义玩法",
+                [action.text() for action in menu.actions()],
+            )
+            self.assertIn(
+                "⚙ 编辑玩法与插件…",
+                [action.text() for action in menu.actions()],
+            )
+            menu.close()
+            chat.close()
+
+    def test_settings_navigation_is_complete_and_pages_scroll(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(str(Path(directory) / "config.json"))
+            settings = SettingsWindow(config)
+
+            self.assertEqual(settings.navigation.count(), 10)
+            self.assertEqual(
+                settings.navigation.verticalScrollBarPolicy(),
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+            )
+            self.assertTrue(
+                all(
+                    isinstance(settings.stack.widget(index), QScrollArea)
+                    for index in range(settings.stack.count())
+                )
+            )
+            settings.show()
+            settings.navigation.setCurrentRow(8)
+            self.app.processEvents()
+            self.assertEqual(
+                settings.navigation.verticalScrollBar().maximum(), 0
+            )
+            self.assertEqual(
+                settings.stack.currentWidget()
+                .verticalScrollBar()
+                .maximum(),
+                0,
+            )
+            settings.close()
 
     def test_chat_shell_has_no_bottom_triangle_cutout(self):
         shell = BubbleShell()
@@ -914,10 +1111,16 @@ class UiSmokeTests(unittest.TestCase):
             self.app.processEvents()
             geo = pet._screen_geometry()
 
-            pet.move(geo.center().x(), geo.bottom() - pet.height() + 1)
+            pet.move(
+                geo.center().x() - pet.width() // 2,
+                geo.bottom() - pet.height() + 1,
+            )
             self.assertFalse(pet._check_edge_docking())
 
-            pet.move(geo.center().x(), geo.top() - 10)
+            pet.move(
+                geo.center().x() - pet.width() // 2,
+                geo.top() - 10,
+            )
             self.assertTrue(pet._check_edge_docking())
             self.assertEqual(pet.dock_side, "top")
             self.assertEqual(
@@ -962,28 +1165,44 @@ class UiSmokeTests(unittest.TestCase):
         delete_later.assert_called_once_with()
 
     def test_missing_api_key_finishes_worker_without_exception(self):
-        controller = DesktopPetApp.__new__(DesktopPetApp)
-        controller.config_mgr = self.config
-        controller.tool_registry = MagicMock()
-        controller.tool_registry.get_tools_schema.return_value = []
-        controller.chat_history_list = []
-        controller.ai_worker = None
-        controller.pet_window = SimpleNamespace(
-            animator=MagicMock(),
-            chat_window=MagicMock(),
-        )
-        with patch("main.SecretStore.get_api_key", return_value=""):
-            controller._on_user_send_message("你好")
-        deadline = time.monotonic() + 2
-        while controller.ai_worker is not None and time.monotonic() < deadline:
-            self.app.processEvents()
-            QTest.qWait(20)
-        self.assertIsNone(controller.ai_worker)
-        controller.pet_window.chat_window.append_message.assert_called()
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DesktopPetApp.__new__(DesktopPetApp)
+            controller.config_mgr = self.config
+            controller.tool_registry = MagicMock()
+            controller.tool_registry.get_tools_schema.return_value = []
+            controller.chat_store = ChatHistoryStore(
+                Path(directory) / "history.sqlite3"
+            )
+            controller.chat_session = ChatSessionService(
+                controller.chat_store
+            )
+            controller.chat_session.activate_character(
+                "shanshan",
+                "山山",
+            )
+            controller.ai_worker = None
+            controller.pet_window = SimpleNamespace(
+                animator=MagicMock(),
+                chat_window=MagicMock(),
+            )
+            with patch("main.SecretStore.get_api_key", return_value=""):
+                controller._on_user_send_message("你好")
+            deadline = time.monotonic() + 2
+            while (
+                controller.ai_worker is not None
+                and time.monotonic() < deadline
+            ):
+                self.app.processEvents()
+                QTest.qWait(20)
+            self.assertIsNone(controller.ai_worker)
+            controller.pet_window.chat_window.append_message.assert_called()
 
     def test_ai_lifecycle_updates_animation_states(self):
         controller = DesktopPetApp.__new__(DesktopPetApp)
-        controller.chat_history_list = []
+        controller.chat_session = MagicMock()
+        controller.chat_session.context.return_value = [
+            {"role": "assistant", "content": "完成"}
+        ]
         controller.pet_window = SimpleNamespace(
             animator=MagicMock(),
             chat_window=MagicMock(),
@@ -1011,22 +1230,6 @@ class UiSmokeTests(unittest.TestCase):
             "你好"
         )
 
-    def test_chat_history_is_bounded_and_starts_with_user(self):
-        controller = DesktopPetApp.__new__(DesktopPetApp)
-        controller.chat_history_list = []
-        for index in range(60):
-            controller.chat_history_list.extend([
-                {"role": "user", "content": f"question-{index}" * 300},
-                {"role": "assistant", "content": f"answer-{index}" * 300},
-            ])
-        controller._trim_chat_history()
-        self.assertLessEqual(len(controller.chat_history_list), 40)
-        self.assertEqual(controller.chat_history_list[0]["role"], "user")
-        self.assertLessEqual(
-            sum(len(item["content"]) for item in controller.chat_history_list),
-            24000,
-        )
-
     def test_quit_waits_for_workers_without_blocking_ui_thread(self):
         controller = DesktopPetApp.__new__(DesktopPetApp)
         controller._quitting = False
@@ -1052,6 +1255,16 @@ class UiSmokeTests(unittest.TestCase):
         controller._maybe_finish_quit()
         controller._instance_lock.unlock.assert_called_once_with()
         controller.app.quit.assert_called_once_with()
+
+    def test_packaged_smoke_mode_schedules_normal_exit(self):
+        controller = DesktopPetApp.__new__(DesktopPetApp)
+        controller._quit_app = MagicMock()
+        with (
+            patch.dict(os.environ, {"PIXKIN_SMOKE_TEST": "1"}),
+            patch("main.QTimer.singleShot") as single_shot,
+        ):
+            controller._schedule_smoke_exit()
+        single_shot.assert_called_once_with(1200, controller._quit_app)
 
     def test_pet_lab_cancel_closes_after_worker_finishes(self):
         lab = PetLabWindow(self.config, self.package_manager)
@@ -1106,11 +1319,10 @@ class UiSmokeTests(unittest.TestCase):
                 task_ids=["canonical", "idle"],
             )
             sheet = root / "assets" / "pixkin" / "pip-avatar.png"
-            store.update_stage(
+            advance_to_final_review(
+                store,
                 run["id"],
-                "final_review",
-                status="needs_review",
-                artifacts={"qa_contact_sheet": str(sheet)},
+                {"qa_contact_sheet": str(sheet)},
             )
             manager = MagicMock()
             lab = PetLabWindow(
@@ -1139,11 +1351,10 @@ class UiSmokeTests(unittest.TestCase):
             Image.new("RGBA", (192, 208), (120, 70, 190, 255)).save(
                 preview, "GIF"
             )
-            store.update_stage(
+            advance_to_final_review(
+                store,
                 run["id"],
-                "final_review",
-                status="needs_review",
-                artifacts={
+                {
                     "animation_previews": {"idle": str(preview)}
                 },
             )
@@ -1236,16 +1447,24 @@ class UiSmokeTests(unittest.TestCase):
 
     def test_pet_lab_declined_replacement_does_not_import(self):
         manager = MagicMock()
+        character_service = MagicMock()
         existing = SimpleNamespace(package_id="same-id", name="旧角色")
         inspected = SimpleNamespace(package_id="same-id", name="新角色")
-        manager.inspect_zip.return_value = inspected
-        manager.list_packages.return_value = [existing]
-        lab = PetLabWindow(self.config, manager)
+        character_service.prepare_install.return_value = SimpleNamespace(
+            can_install=True,
+            package=inspected,
+        )
+        character_service.list_packages.return_value = [existing]
+        lab = PetLabWindow(
+            self.config,
+            manager,
+            character_service=character_service,
+        )
 
         with patch.object(lab, "_confirm_replace", return_value=False):
             lab._on_package_ready("generated.zip")
 
-        manager.import_zip.assert_not_called()
+        character_service.install.assert_not_called()
         self.assertIsNone(lab.generated_package)
         lab.close()
 

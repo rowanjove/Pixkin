@@ -4,3 +4,4 @@ requests>=2.31.0
 PyYAML>=6.0.2
 pywin32>=306
 Pillow>=10.4.0
+cryptography>=45.0

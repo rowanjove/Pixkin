@@ -9,15 +9,24 @@ from PyQt6.QtWidgets import (
 
 from core.character_package import CharacterPackageError, CharacterPackageManager
 from core.paths import resource_path
+from core.services.character_service import CharacterService
 from ui.theme import resolved_theme
 
 
 class FirstRunWindow(QDialog):
     """首次启动必须导入一个角色包，成功后才进入主程序。"""
 
-    def __init__(self, package_manager: CharacterPackageManager, parent=None):
+    def __init__(
+        self,
+        package_manager: CharacterPackageManager,
+        parent=None,
+        character_service: CharacterService = None,
+    ):
         super().__init__(parent)
         self.package_manager = package_manager
+        self.character_service = character_service or CharacterService(
+            package_manager
+        )
         self.imported_package = None
         self.setWindowTitle("欢迎使用 Pixkin")
         self.setWindowIcon(QIcon(str(resource_path("assets/pixkin.ico"))))
@@ -27,7 +36,7 @@ class FirstRunWindow(QDialog):
         self.setFont(QFont("Microsoft YaHei UI", 9))
         self.setAcceptDrops(True)
         self.setStyleSheet(
-            self._style(resolved_theme(self.package_manager.config))
+            self._style(resolved_theme(self.character_service.config))
         )
         self._build_ui()
 
@@ -192,16 +201,18 @@ class FirstRunWindow(QDialog):
 
     def _import(self, path: str, replace=False):
         try:
-            self.imported_package = self.package_manager.import_zip(
-                path, replace=replace
-            )
+            self.imported_package = self.character_service.install_archive(
+                path,
+                replace_confirmed=replace,
+                allow_builtin_replace=replace,
+            ).package
         except CharacterPackageError as exc:
             QMessageBox.warning(self, "角色包无法导入", str(exc))
             return
         except Exception as exc:
             QMessageBox.critical(self, "导入失败", f"导入角色包时发生错误：\n{exc}")
             return
-        self.package_manager.config.update_section(
+        self.character_service.config.update_section(
             "app", {"first_run_complete": True}
         )
         QMessageBox.information(

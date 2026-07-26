@@ -2,7 +2,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
+sbom.json
 .venv/
 .idea/
 .vscode/
@@ -13,5 +15,7 @@ release/
 artifacts/
 .runtime-*/
 config.json
+*.key
+*private*.pem
 tmp/
 /*.zip

@@ -12,10 +12,17 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional
 
+from core.generation.state_machine import (
+    GenerationStage,
+    GenerationStateMachine,
+    GenerationTransitionError,
+    STAGE_DEFINITIONS,
+)
 from core.paths import user_data_dir
 
 
 RUN_SCHEMA_VERSION = 1
+WORKFLOW_SCHEMA_VERSION = 2
 RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 RUN_STATUSES = {
     "pending",
@@ -81,6 +88,7 @@ class PetGenerationRunStore:
 
         record = {
             "schema_version": RUN_SCHEMA_VERSION,
+            "workflow_schema_version": WORKFLOW_SCHEMA_VERSION,
             "id": run_id,
             "created_at": now,
             "updated_at": now,
@@ -91,6 +99,13 @@ class PetGenerationRunStore:
             "artifacts": {},
             "reviews": {},
             "metrics": {"api_calls": []},
+            "state_history": [{
+                "from": None,
+                "to": GenerationStage.CREATED.value,
+                "status": "pending",
+                "at": now,
+                "reason": "created",
+            }],
             "error": None,
         }
         self._write(record)
@@ -113,11 +128,13 @@ class PetGenerationRunStore:
             raise PetGenerationRunError(
                 f"孵化任务记录无法读取：{run_id}"
             ) from exc
-        # Early v1 manifests did not contain review decisions. Keep them
+        record = self._migrate_record(record)
+        # Early manifests did not contain review decisions. Keep them
         # resumable instead of forcing users to discard generated artwork.
         record.setdefault("reviews", {})
         record.setdefault("metrics", {"api_calls": []})
         record["metrics"].setdefault("api_calls", [])
+        record.setdefault("state_history", [])
         for task in record.get("tasks", {}).values():
             if isinstance(task, dict):
                 task.setdefault("candidates", [])
@@ -146,17 +163,58 @@ class PetGenerationRunStore:
         status: Optional[str] = None,
         error: Optional[str] = None,
         artifacts: Optional[Dict[str, Any]] = None,
+        reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         record = self.load(run_id)
-        if status is not None:
-            if status not in RUN_STATUSES:
-                raise PetGenerationRunError(f"不支持的孵化状态：{status}")
-            record["status"] = status
-        record["stage"] = str(stage)
-        record["error"] = str(error) if error else None
+        if status is not None and status not in RUN_STATUSES:
+            raise PetGenerationRunError(f"不支持的孵化状态：{status}")
+        now = _utc_now()
         if artifacts:
             record["artifacts"].update(copy.deepcopy(artifacts))
-        record["updated_at"] = _utc_now()
+        try:
+            GenerationStateMachine.transition(
+                record,
+                stage,
+                status=status,
+                at=now,
+                reason=reason or "update_stage",
+            )
+        except GenerationTransitionError as exc:
+            raise PetGenerationRunError(str(exc)) from exc
+        record["error"] = str(error) if error else None
+        record["updated_at"] = now
+        self._write(record)
+        return copy.deepcopy(record)
+
+    def complete_install(
+        self,
+        run_id: str,
+        installed_package_id: str,
+    ) -> Dict[str, Any]:
+        """Atomically record final acceptance and the installed package."""
+        package_id = str(installed_package_id).strip()
+        if not package_id:
+            raise PetGenerationRunError("已安装角色 ID 不能为空。")
+        record = self.load(run_id)
+        now = _utc_now()
+        record["reviews"]["final_package"] = {
+            "decision": "accepted",
+            "note": None,
+            "updated_at": now,
+        }
+        record["artifacts"]["installed_package_id"] = package_id
+        try:
+            GenerationStateMachine.transition(
+                record,
+                GenerationStage.INSTALLED,
+                status="complete",
+                at=now,
+                reason="package_installed",
+            )
+        except GenerationTransitionError as exc:
+            raise PetGenerationRunError(str(exc)) from exc
+        record["error"] = None
+        record["updated_at"] = now
         self._write(record)
         return copy.deepcopy(record)
 
@@ -349,6 +407,11 @@ class PetGenerationRunStore:
         if task_id == "canonical":
             record["reviews"].pop("canonical", None)
             record["reviews"].pop("core_actions", None)
+            canonical_artifact = record["tasks"]["canonical"].get(
+                "artifact"
+            )
+            if canonical_artifact:
+                record["artifacts"]["canonical"] = canonical_artifact
             for other_id, task in record["tasks"].items():
                 if other_id == "canonical":
                     continue
@@ -356,13 +419,21 @@ class PetGenerationRunStore:
                 task["artifact"] = None
                 task["error"] = None
                 task["updated_at"] = now
-            record["stage"] = "canonical_review"
-            record["status"] = "needs_review"
+            target_stage = GenerationStage.CANONICAL_REVIEW
         else:
             if task_id in set(core_task_ids):
                 record["reviews"].pop("core_actions", None)
-            record["stage"] = "action_generation"
-            record["status"] = "pending"
+            target_stage = GenerationStage.ACTION_GENERATION
+        try:
+            GenerationStateMachine.transition(
+                record,
+                target_stage,
+                status=STAGE_DEFINITIONS[target_stage].default_status,
+                at=now,
+                reason=f"candidate_selected:{task_id}",
+            )
+        except GenerationTransitionError as exc:
+            raise PetGenerationRunError(str(exc)) from exc
         record["error"] = None
         record["updated_at"] = now
         self._write(record)
@@ -401,6 +472,58 @@ class PetGenerationRunStore:
 
     def _manifest_path(self, run_id: str) -> Path:
         return self.workspace(run_id) / "run.json"
+
+    @staticmethod
+    def _migrate_record(record: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(record, dict):
+            raise PetGenerationRunError("孵化任务记录必须是对象。")
+        if record.get("schema_version") != RUN_SCHEMA_VERSION:
+            raise PetGenerationRunError("不支持的孵化任务记录版本。")
+        workflow_version = record.get("workflow_schema_version")
+        if workflow_version == WORKFLOW_SCHEMA_VERSION:
+            return record
+        if workflow_version is not None:
+            raise PetGenerationRunError("不支持的孵化工作流版本。")
+
+        migrated = copy.deepcopy(record)
+        stage_aliases = {
+            "running": GenerationStage.ACTION_GENERATION,
+            "ready": GenerationStage.FINAL_REVIEW,
+        }
+        raw_stage = str(migrated.get("stage") or "")
+        try:
+            stage = GenerationStateMachine.stage(raw_stage)
+        except GenerationTransitionError:
+            if migrated.get("status") == "failed":
+                stage = GenerationStage.FAILED
+            elif migrated.get("status") == "canceled":
+                stage = GenerationStage.CANCELED
+            else:
+                stage = stage_aliases.get(
+                    raw_stage,
+                    GenerationStage.CREATED,
+                )
+        if raw_stage in stage_aliases:
+            stage = stage_aliases[raw_stage]
+        definition = STAGE_DEFINITIONS[stage]
+        status = migrated.get("status")
+        if status not in definition.statuses:
+            status = definition.default_status
+        migrated["workflow_schema_version"] = WORKFLOW_SCHEMA_VERSION
+        migrated["stage"] = stage.value
+        migrated["status"] = status
+        migrated["state_history"] = [{
+            "from": None,
+            "to": stage.value,
+            "status": status,
+            "at": str(
+                migrated.get("updated_at")
+                or migrated.get("created_at")
+                or _utc_now()
+            ),
+            "reason": "migrated_from_v1",
+        }]
+        return migrated
 
     def _write(self, record: Dict[str, Any]) -> None:
         run_id = self._validated_run_id(str(record.get("id", "")))
@@ -479,10 +602,18 @@ class PetGenerationRunStore:
             raise PetGenerationRunError("孵化任务记录必须是对象。")
         if record.get("schema_version") != RUN_SCHEMA_VERSION:
             raise PetGenerationRunError("不支持的孵化任务记录版本。")
+        if (
+            record.get("workflow_schema_version")
+            != WORKFLOW_SCHEMA_VERSION
+        ):
+            raise PetGenerationRunError("不支持的孵化工作流版本。")
         if record.get("id") != expected_id:
             raise PetGenerationRunError("孵化任务 ID 与目录不一致。")
-        if record.get("status") not in RUN_STATUSES:
-            raise PetGenerationRunError("孵化任务状态无效。")
+        try:
+            GenerationStateMachine.validate_record_state(record)
+            GenerationStateMachine.validate_history(record)
+        except GenerationTransitionError as exc:
+            raise PetGenerationRunError(str(exc)) from exc
         if not isinstance(record.get("tasks"), dict):
             raise PetGenerationRunError("孵化任务列表无效。")
         if not isinstance(record.get("artifacts"), dict):

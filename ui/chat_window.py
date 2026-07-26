@@ -1,20 +1,30 @@
-import html
 import random
 from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRectF, QTimer
 from PyQt6.QtGui import (
-    QAction, QColor, QFont, QFontMetrics, QMouseEvent, QPainter, QPainterPath,
+    QAction, QColor, QFont, QMouseEvent, QPainter, QPainterPath,
     QPixmap,
 )
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-    QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
+    QLineEdit, QMenu, QPushButton, QScrollArea, QTextBrowser,
     QVBoxLayout, QWidget,
 )
 
-from core.paths import resource_path
+from core.paths import resource_path, user_data_dir
+from core.services.extension_service import (
+    ExtensionManifestError,
+    ExtensionService,
+)
+from ui.chat_message_components import (
+    MessageRow,
+    WelcomeMessageCard,
+    avatar_pixmap as _avatar_pixmap,
+    friendly_day_label,
+    render_transcript_html,
+)
 from ui.theme import resolved_theme
 
 
@@ -58,209 +68,18 @@ class BubbleShell(QFrame):
         painter.drawPath(path)
 
 
-def _avatar_pixmap(path, size: int) -> QPixmap:
-    source = QPixmap(str(path)) if path else QPixmap()
-    result = QPixmap(size, size)
-    result.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(result)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#273248"))
-    painter.drawEllipse(0, 0, size, size)
-    if not source.isNull():
-        scaled = source.scaled(
-            size - 4, size - 4,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        painter.setClipPath(
-            _circle_path(size - 4, 2)
-        )
-        painter.drawPixmap(
-            (size - scaled.width()) // 2,
-            (size - scaled.height()) // 2,
-            scaled,
-        )
-    painter.end()
-    return result
-
-
-def _user_avatar_pixmap(path, size: int) -> QPixmap:
-    source = QPixmap(str(path)) if path else QPixmap()
-    if source.isNull():
-        return QPixmap()
-    scaled = source.scaled(
-        size,
-        size,
-        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-        Qt.TransformationMode.SmoothTransformation,
-    )
-    x = max(0, (scaled.width() - size) // 2)
-    y = max(0, (scaled.height() - size) // 2)
-    result = QPixmap(size, size)
-    result.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(result)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setClipPath(_circle_path(size))
-    painter.drawPixmap(0, 0, scaled.copy(x, y, size, size))
-    painter.end()
-    return result
-
-
-def _circle_path(diameter: int, offset: int = 0):
-    path = QPainterPath()
-    path.addEllipse(offset, offset, diameter, diameter)
-    return path
-
-
-class MessageRow(QWidget):
-    def __init__(
-        self,
-        role: str,
-        content: str,
-        avatar_path=None,
-        author_name="山山",
-        user_avatar_path=None,
-        user_name="我",
-        metadata=None,
-        parent=None,
-    ):
-        super().__init__(parent)
-        metadata = metadata or {}
-        self.text_label = None
-        self.author_label = None
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        row = QHBoxLayout(self)
-        row.setContentsMargins(2, 4, 2, 4)
-        row.setSpacing(9)
-
-        if role in {"system", "error"}:
-            pill = QLabel(content)
-            pill.setTextFormat(Qt.TextFormat.PlainText)
-            pill.setWordWrap(True)
-            pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pill.setObjectName("errorPill" if role == "error" else "toolPill")
-            pill.setMaximumWidth(330)
-            self.text_label = pill
-            row.addStretch()
-            row.addWidget(pill)
-            row.addStretch()
-            return
-
-        if role == "alert":
-            card = QFrame()
-            card.setObjectName("alertCard")
-            card.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-            )
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(15, 13, 15, 13)
-            card_layout.setSpacing(7)
-            badge_row = QHBoxLayout()
-            badge_row.setSpacing(7)
-            live_badge = QLabel("● LIVE")
-            live_badge.setObjectName("liveBadge")
-            platform_badge = QLabel(metadata.get("platform") or "直播提醒")
-            platform_badge.setObjectName("platformBadge")
-            badge_row.addWidget(live_badge)
-            badge_row.addWidget(platform_badge)
-            badge_row.addStretch()
-            headline = QLabel(metadata.get("headline") or "关注的主播开播了")
-            headline.setObjectName("alertAnchor")
-            headline.setTextFormat(Qt.TextFormat.PlainText)
-            text = QLabel(metadata.get("body") or content)
-            text.setObjectName("alertTitle")
-            text.setTextFormat(Qt.TextFormat.PlainText)
-            text.setWordWrap(True)
-            text.setMinimumHeight(
-                max(
-                    36,
-                    QFontMetrics(text.font()).boundingRect(
-                        0, 0, 300, 1000,
-                        int(Qt.TextFlag.TextWordWrap),
-                        text.text(),
-                    ).height(),
-                )
-            )
-            meta = QLabel(metadata.get("meta") or "刚刚检测到开播")
-            meta.setObjectName("alertMeta")
-            self.text_label = text
-            card_layout.addLayout(badge_row)
-            card_layout.addWidget(headline)
-            card_layout.addWidget(text)
-            card_layout.addWidget(meta)
-            row.addWidget(card)
-            return
-
-        avatar = QLabel()
-        avatar.setFixedSize(34, 34)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        if role == "user":
-            avatar.setObjectName("userAvatar")
-            user_source = (
-                QPixmap(str(user_avatar_path)) if user_avatar_path else QPixmap()
-            )
-            if user_source.isNull():
-                avatar.setText((user_name or "我")[:2])
-            else:
-                avatar.setPixmap(_user_avatar_pixmap(user_avatar_path, 34))
-        else:
-            avatar.setPixmap(_avatar_pixmap(avatar_path, 34))
-
-        bubble = QFrame()
-        bubble.setObjectName("userBubble" if role == "user" else "assistantBubble")
-        bubble.setMaximumWidth(306)
-        bubble.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
-        )
-        bubble_layout = QVBoxLayout(bubble)
-        bubble_layout.setContentsMargins(13, 10, 13, 10)
-        bubble_layout.setSpacing(4)
-        author = QLabel(user_name if role == "user" else author_name)
-        author.setObjectName(
-            "userMessageAuthor" if role == "user" else "messageAuthor"
-        )
-        if role == "user":
-            author.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.author_label = author
-        bubble_layout.addWidget(author)
-        text = QLabel(content or "•••")
-        text.setObjectName("messageText")
-        text.setTextFormat(Qt.TextFormat.PlainText)
-        text.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        text.setWordWrap(True)
-        self.text_label = text
-        bubble_layout.addWidget(text)
-
-        if role == "user":
-            row.addStretch()
-            row.addWidget(bubble)
-            row.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
-        else:
-            row.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
-            row.addWidget(bubble)
-            row.addStretch()
-
-    def set_content(self, content: str):
-        if self.text_label is None:
-            return
-        self.text_label.setText(content or "•••")
-        self.text_label.updateGeometry()
-        self.updateGeometry()
-
-
 class ChatBubbleWindow(QWidget):
     """Pixkin 悬浮对话气泡：头像、消息气泡、工具与直播提醒。"""
 
     send_message_signal = pyqtSignal(str)
+    retry_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     pet_lab_requested = pyqtSignal()
     history_requested = pyqtSignal()
     new_session_requested = pyqtSignal()
+    stop_requested = pyqtSignal()
+    push_to_talk_pressed = pyqtSignal()
+    push_to_talk_released = pyqtSignal()
 
     def __init__(self, config_manager=None, parent=None):
         super().__init__(parent)
@@ -399,6 +218,13 @@ class ChatBubbleWindow(QWidget):
                 border-radius: 15px; font-size: 16px; font-weight: 500;
             }
             QPushButton#toolButton:hover { background: #34425D; }
+            QPushButton#voiceButton {
+                color: #AEB8CC; background: #2A354B; border: none;
+                border-radius: 15px; font-size: 14px;
+            }
+            QPushButton#voiceButton:pressed {
+                color: #101624; background: #FFB7A7;
+            }
             QPushButton#sendButton {
                 color: #101624; background: #7BE0D0; border: none;
                 border-radius: 15px; font-size: 16px; font-weight: 900;
@@ -418,6 +244,14 @@ class ChatBubbleWindow(QWidget):
             }
             QPushButton#suggestion:hover {
                 color: white; border-color: #7BE0D0; background: #253148;
+            }
+            QPushButton#memoryDetailsButton,
+            QPushButton#editResendButton {
+                color: #7BE0D0; background: transparent; border: none;
+                text-align: left; padding: 3px 0; font-size: 9px;
+            }
+            QLabel#memoryDetails, QLabel#chatMetrics {
+                color: #98A2B8; font-size: 9px;
             }
             QMenu {
                 background: #171F30; color: #DDE3EE; border: 1px solid #344057;
@@ -512,6 +346,12 @@ class ChatBubbleWindow(QWidget):
         self.tool_btn.setFixedSize(30, 30)
         self.tool_btn.setToolTip("快捷工具")
         self.tool_btn.clicked.connect(self._show_tool_menu)
+        self.voice_btn = QPushButton("●")
+        self.voice_btn.setObjectName("voiceButton")
+        self.voice_btn.setFixedSize(30, 30)
+        self.voice_btn.setToolTip("按住说话 · 松开停止")
+        self.voice_btn.pressed.connect(self.push_to_talk_pressed)
+        self.voice_btn.released.connect(self.push_to_talk_released)
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("问问山山，或让她帮你做点什么…")
         self.input_field.returnPressed.connect(self._on_send_click)
@@ -519,11 +359,32 @@ class ChatBubbleWindow(QWidget):
         self.send_btn.setObjectName("sendButton")
         self.send_btn.setFixedSize(30, 30)
         self.send_btn.clicked.connect(self._on_send_click)
+        self.retry_btn = QPushButton("↻")
+        self.retry_btn.setObjectName("sendButton")
+        self.retry_btn.setFixedSize(30, 30)
+        self.retry_btn.setToolTip("重试上一条消息")
+        self.retry_btn.clicked.connect(self.retry_requested)
+        self.retry_btn.hide()
+        self.stop_btn = QPushButton("■")
+        self.stop_btn.setObjectName("sendButton")
+        self.stop_btn.setFixedSize(30, 30)
+        self.stop_btn.setToolTip("停止生成")
+        self.stop_btn.clicked.connect(self.stop_requested)
+        self.stop_btn.hide()
         composer_row.addWidget(self.tool_btn)
+        composer_row.addWidget(self.voice_btn)
         composer_row.addWidget(self.input_field, 1)
+        composer_row.addWidget(self.retry_btn)
+        composer_row.addWidget(self.stop_btn)
         composer_row.addWidget(self.send_btn)
         card.addWidget(composer)
 
+        self.mic_status_label = QLabel(
+            "麦克风关闭 · 按住圆点才会录音"
+        )
+        self.mic_status_label.setObjectName("finePrint")
+        self.mic_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card.addWidget(self.mic_status_label)
         fine_print = QLabel("AI 可调用已启用的本地工具 · 按回车发送")
         fine_print.setObjectName("finePrint")
         fine_print.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -705,12 +566,24 @@ class ChatBubbleWindow(QWidget):
         if not self._stream_update_timer.isActive():
             self._stream_update_timer.start()
 
-    def complete_stream(self):
+    def complete_stream(self, metadata=None):
         self._stream_update_timer.stop()
         self._flush_stream_update()
+        stream_row = self._stream_row
+        if (
+            self._stream_index is not None
+            and isinstance(metadata, dict)
+        ):
+            self._messages[self._stream_index]["metadata"] = dict(metadata)
+            if stream_row is not None:
+                stream_row.set_metadata(metadata)
         self._stream_index = None
         self._stream_row = None
         self._render_transcript()
+        self.messages_layout.invalidate()
+        self.messages_host.updateGeometry()
+        self._scroll_timer.stop()
+        self._scroll_to_bottom()
         self._schedule_scroll_to_bottom()
 
     def cancel_stream(self):
@@ -729,10 +602,38 @@ class ChatBubbleWindow(QWidget):
         self.input_field.setDisabled(busy)
         self.send_btn.setDisabled(busy)
         self.tool_btn.setDisabled(busy)
+        self.voice_btn.setDisabled(busy)
+        self.retry_btn.setDisabled(busy)
+        self.stop_btn.setVisible(busy)
+        self.send_btn.setVisible(not busy)
         state = "思考中…" if busy else "待命"
         self.status_label.setText(state)
         if not busy and self._focus_after_response:
             QTimer.singleShot(0, self._restore_input_focus)
+
+    def set_microphone_status(
+        self,
+        text: str,
+        *,
+        enabled: bool = True,
+    ):
+        self.mic_status_label.setText(str(text))
+        self.voice_btn.setEnabled(
+            bool(enabled) and self.input_field.isEnabled()
+        )
+
+    def insert_voice_text(self, text: str):
+        value = str(text or "").strip()
+        if not value:
+            return
+        current = self.input_field.text().strip()
+        self.input_field.setText(
+            f"{current} {value}".strip() if current else value
+        )
+        self.input_field.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def set_retry_available(self, available: bool) -> None:
+        self.retry_btn.setVisible(bool(available))
 
     def show_alert_bubble(self, title: str, text: str):
         clean = text.replace("<br/>", "\n").replace("<b>", "").replace("</b>", "")
@@ -787,36 +688,11 @@ class ChatBubbleWindow(QWidget):
                 widget.deleteLater()
 
     def _welcome_widget(self):
-        card = QFrame()
-        card.setObjectName("welcomeCard")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(18, 20, 18, 18)
-        layout.setSpacing(8)
-        avatar = QLabel()
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setPixmap(_avatar_pixmap(self._avatar_path, 78))
-        title = QLabel(f"你好，我是 {self._character_name}")
-        title.setObjectName("welcomeTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        copy = QLabel("你的桌面 AI 小伙伴。\n能聊天、调用工具，也能孵化新的卡通角色。")
-        copy.setObjectName("welcomeCopy")
-        copy.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        copy.setWordWrap(True)
-        layout.addWidget(avatar)
-        layout.addWidget(title)
-        layout.addWidget(copy)
-        for text, prompt in (
-            ("你能做什么？", "介绍一下你能调用的工具"),
-            ("打开计算器", "请打开计算器"),
-            ("现在几点？", "现在几点了？"),
-        ):
-            button = QPushButton(text)
-            button.setObjectName("suggestion")
-            button.clicked.connect(
-                lambda _checked=False, value=prompt: self._send_prompt(value)
-            )
-            layout.addWidget(button)
-        return card
+        return WelcomeMessageCard(
+            self._character_name,
+            self._avatar_path,
+            self._send_prompt,
+        )
 
     def _render_messages(self):
         self._clear_message_widgets()
@@ -843,6 +719,7 @@ class ChatBubbleWindow(QWidget):
                     self._user_avatar_path,
                     self._user_name,
                     item.get("metadata"),
+                    self._edit_and_resend,
                 )
                 self._message_rows.append(message)
                 self.messages_layout.addWidget(message)
@@ -852,18 +729,16 @@ class ChatBubbleWindow(QWidget):
         self._render_transcript()
         self._schedule_scroll_to_bottom()
 
+    def _edit_and_resend(self, content: str):
+        if not self.input_field.isEnabled():
+            return
+        self.input_field.setText(str(content))
+        self.input_field.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.input_field.selectAll()
+
     @staticmethod
     def _friendly_day(day: str) -> str:
-        today = datetime.now().astimezone().date()
-        try:
-            value = datetime.strptime(day, "%Y-%m-%d").date()
-        except ValueError:
-            return day
-        if value == today:
-            return "今天"
-        if (today - value).days == 1:
-            return "昨天"
-        return value.strftime("%Y年%m月%d日")
+        return friendly_day_label(day)
 
     def _flush_stream_update(self):
         if self._stream_index is None:
@@ -880,26 +755,22 @@ class ChatBubbleWindow(QWidget):
         self._schedule_scroll_to_bottom()
 
     def _render_transcript(self):
-        parts = ["<div>"]
-        for item in self._messages:
-            safe = html.escape(item["content"] or "•••").replace("\n", "<br>")
-            parts.append(f"<p><b>{html.escape(item['role'])}</b>: {safe}</p>")
-        parts.append("</div>")
-        self.chat_history.setHtml("".join(parts))
+        self.chat_history.setHtml(render_transcript_html(self._messages))
 
     def _scroll_to_bottom(self):
         self.messages_layout.activate()
         self.messages_host.adjustSize()
         bar = self.scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
-        QTimer.singleShot(
-            0,
-            lambda target=bar: target.setValue(target.maximum()),
-        )
 
     def _schedule_scroll_to_bottom(self):
         if not self._scroll_timer.isActive():
             self._scroll_timer.start()
+
+    def closeEvent(self, event):
+        self._stream_update_timer.stop()
+        self._scroll_timer.stop()
+        super().closeEvent(event)
 
     def _build_tool_menu(self):
         menu = QMenu(self)
@@ -924,12 +795,21 @@ class ChatBubbleWindow(QWidget):
                     "给今天设计一个荒诞但可完成的小任务。",
                 ),
             ),
-            ("🌙 抽一张今日心情签", "send", "给我抽一张今天的心情签，写上签名、解读和一个小行动。"),
-            ("🧠 开启反向提问局", "send", "接下来由你问我三个有趣的问题，一次只问一个。"),
-            ("🎨 玩灵感接龙", "send", "和我玩灵感接龙：你先给出一个画面，我接着补充。"),
-            ("🚀 把我夸到起飞", "send", "根据我们聊过的内容，用具体又不油腻的方式夸夸我。"),
         ):
             self._add_menu_action(menu, label, mode, payload)
+        for extension in self._gameplay_extensions():
+            self._add_menu_action(
+                menu,
+                f"{extension.icon} {extension.name}",
+                "send",
+                extension.prompt,
+            )
+        self._add_menu_action(
+            menu,
+            "⚙ 编辑玩法与插件…",
+            "settings",
+            None,
+        )
 
         toolbox = menu.addMenu(
             f"🧰 实用百宝箱 · {len(self._available_tool_names)} 项"
@@ -1023,6 +903,32 @@ class ChatBubbleWindow(QWidget):
             self.new_session_requested.emit()
         elif mode == "studio":
             self.pet_lab_requested.emit()
+        elif mode == "settings":
+            self.settings_requested.emit()
+
+    def _gameplay_extensions(self):
+        config = {}
+        plugin_root = user_data_dir() / "plugins"
+        if self.config_manager is not None:
+            raw = self.config_manager.get("extensions", default={})
+            if isinstance(raw, dict):
+                config = raw
+            config_path = getattr(
+                self.config_manager, "config_path", ""
+            )
+            if config_path:
+                plugin_root = Path(config_path).resolve().parent / "plugins"
+        service = ExtensionService(plugin_root)
+        try:
+            return service.available_gameplay(
+                config.get("gameplay"),
+                config.get("enabled_plugins", []),
+            )
+        except ExtensionManifestError:
+            return ExtensionService(plugin_root).available_gameplay(
+                None,
+                [],
+            )
 
     def _prefill_prompt(self, value: str):
         if not self.input_field.isEnabled():
