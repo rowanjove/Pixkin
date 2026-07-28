@@ -1,0 +1,97 @@
+name: Release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r requirements-lock.txt
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Verify release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $Version = (python -c "from core.version import VERSION; print(VERSION)").Trim()
+          if ("v$Version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match application version v$Version"
+          }
+
+      - name: Run release tests
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_quality.ps1
+
+      - name: Build release artifacts
+        shell: powershell
+        env:
+          PIXKIN_UPDATE_PRIVATE_KEY_B64: ${{ secrets.PIXKIN_UPDATE_PRIVATE_KEY_B64 }}
+          PIXKIN_UPDATE_BASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/
+          PIXKIN_UPDATE_RELEASE_NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+          PIXKIN_UPDATE_MANIFEST_URL: ${{ github.server_url }}/${{ github.repository }}/releases/latest/download/update-stable.json
+          PIXKIN_UPDATE_CHANNEL: stable
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1
+
+      - name: Verify signed update manifest exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "release\update-stable.json")) {
+            throw "Missing signed update manifest; configure PIXKIN_UPDATE_PRIVATE_KEY_B64"
+          }
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixkin-release-${{ github.ref_name }}
+          path: release/*
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish GitHub Release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "${{ github.ref_name }}" `
+              --repo "${{ github.repository }}" `
+              --verify-tag `
+              --title "Pixkin ${{ github.ref_name }}" `
+              --generate-notes
+          }
+          Get-ChildItem -LiteralPath release -File | ForEach-Object {
+            gh release upload "${{ github.ref_name }}" $_.FullName `
+              --repo "${{ github.repository }}" `
+              --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to upload release asset: $($_.Name)"
+            }
+          }

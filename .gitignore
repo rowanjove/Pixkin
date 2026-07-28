@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+sbom.json
+.venv/
+.idea/
+.vscode/
+*.log
+build/
+dist/
+release/
+artifacts/
+.runtime-*/
+config.json
+*.key
+*private*.pem
+tmp/
+/*.zip
+
+# Character generation workspaces and QA intermediates
+/character-packs/v2-runs/
+/character-packs/*-hatch/
+/character-packs/*-edge/
+/character-packs/qa-sources/
