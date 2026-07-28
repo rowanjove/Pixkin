@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: windows-2025
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r requirements-lock.txt
+
+      - name: Verify dependency lock
+        shell: pwsh
+        run: |
+          python -m piptools compile --quiet --generate-hashes --strip-extras `
+            --output-file requirements-lock.txt requirements-build.txt
+          git diff --exit-code -- requirements-lock.txt
+
+      - name: Run quality gates
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_quality.ps1
+
+      - name: Audit dependencies and generate SBOM
+        run: >-
+          python -m pip_audit -r requirements-lock.txt
+          --format cyclonedx-json --output sbom.json
+
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixkin-quality-${{ github.sha }}
+          path: |
+            coverage.xml
+            sbom.json
+          if-no-files-found: warn
+
+      - name: Build folder distribution smoke test
+        run: python -m PyInstaller --noconfirm desktop_pet.spec
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "dist\Pixkin\Pixkin.exe")) {
+            throw "Missing dist\Pixkin\Pixkin.exe"
+          }
+          foreach ($Name in @("shanshan.zip", "linlin.zip", "pip.zip")) {
+            $Path = Join-Path "dist\Pixkin\_internal\character-packs" $Name
+            if (-not (Test-Path -LiteralPath $Path)) {
+              throw "Missing bundled character: $Path"
+            }
+          }
+
+      - name: Smoke packaged executable
+        run: python scripts/smoke_release.py dist\Pixkin\Pixkin.exe
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile current-user installer
+        shell: pwsh
+        run: .\scripts\build_installer.ps1
+
+      - name: Upload packaged smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixkin-smoke-${{ github.sha }}
+          path: artifacts/exe-smoke/**/Pixkin/logs/pixkin.log
+          if-no-files-found: warn
+
+  windows-compatibility:
+    name: Windows compatibility (${{ matrix.os }}, ${{ matrix.scale }}x)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            scale: "1.0"
+            package_smoke: true
+          - os: windows-2022
+            scale: "2.0"
+            package_smoke: false
+          - os: windows-2025
+            scale: "2.0"
+            package_smoke: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_SCALE_FACTOR: ${{ matrix.scale }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r requirements-lock.txt
+
+      - name: Run DPI and multi-display compatibility tests
+        run: |
+          python -m pytest tests/test_display_layout.py -q
+          python -m pytest tests/test_ui.py -q
+
+      - name: Build Windows Server 2022 compatibility artifact
+        if: matrix.package_smoke
+        run: python -m PyInstaller --noconfirm desktop_pet.spec
+
+      - name: Smoke Windows Server 2022 packaged executable
+        if: matrix.package_smoke
+        run: python scripts/smoke_release.py dist\Pixkin\Pixkin.exe
+
+      - name: Upload compatibility smoke logs
+        if: always() && matrix.package_smoke
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixkin-compat-${{ matrix.os }}-${{ github.sha }}
+          path: artifacts/exe-smoke/**/Pixkin/logs/pixkin.log
+          if-no-files-found: warn

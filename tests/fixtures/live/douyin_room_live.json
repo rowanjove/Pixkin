@@ -1,0 +1,16 @@
+{
+  "data": {
+    "data": [
+      {
+        "status": 2,
+        "title": "晚间直播",
+        "stream_url": {
+          "live_core_sdk_data": "sanitized"
+        },
+        "owner": {
+          "nickname": "示例主播"
+        }
+      }
+    ]
+  }
+}
