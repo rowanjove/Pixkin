@@ -1,238 +1,134 @@
-# Pixkin
+# Pixkin — Windows AI 桌面伙伴
 
-**一只有自己小脾气的 AI 桌面伙伴。**
+[简体中文](README.md) | [English](README.en.md)
 
-Pixkin 是面向 Windows 10 / 11 的卡通桌面伙伴。它会随机组合动作、响应点击和拖动、
-吸附屏幕边缘并探头；也能常驻托盘，进行大模型对话、调用经过白名单保护的本地工具，
-以及同时监听 B 站和抖音直播状态。
+Pixkin 是面向 Windows 10/11 x64 的桌面伙伴，支持角色动画、模型对话、角色包导入、图像生成工坊和 B 站／抖音开播提醒。伙伴可以响应点击与拖动、贴边停靠，也可常驻托盘。
 
-发行版已经内置运行环境，用户不需要安装 Python。
+[下载 v1.3.0](https://github.com/rowanjove/pixkin/releases/tag/v1.3.0) · [报告问题](https://github.com/rowanjove/pixkin/issues) · [角色包规范](CHARACTER_PACKAGE_SPEC.md)
 
-## 用户使用
+发行版内置运行环境，不需要单独安装 Python。聊天、语音转写和角色生成可以调用外部模型服务，需要自己的接口配置，可能产生费用；它不是完全离线的 AI 应用。
 
-推荐下载兼容性优先的 `Pixkin-1.3.0-win64.zip`：
+## 安装与开始使用
 
-1. 解压完整的 `Pixkin` 文件夹。
-2. 双击 `Pixkin.exe`。
-3. 首次启动默认使用内置伙伴山山，也可在设置中切换到凛凛、Pip，或导入 ZIP 角色包。
-4. 点击桌宠打开带头像的对话气泡；从托盘进入设置或伙伴工坊。
+从 Release 选择：
 
-同时提供 `Pixkin-Portable-1.3.0.exe` 单文件版。单文件版每次启动都要先展开运行环境，
-速度会稍慢，也更容易触发部分安全软件的未知程序提示；日常使用更推荐文件夹版。
+- `Pixkin-1.3.0-win64.zip`：推荐的文件夹版，完整解压后运行 `Pixkin.exe`。
+- `Pixkin-Portable-1.3.0.exe`：单文件版，启动时需展开运行环境，可能更慢。
+- `Pixkin-Setup-1.3.0.exe`：安装包。
 
-## 伙伴工坊：用一张图孵化新伙伴
+首次启动默认使用山山，可在设置中切换凛凛、Pip，或导入角色 ZIP。点击伙伴打开对话气泡，从托盘进入设置与伙伴工坊。
 
-至少添加一张风格示意图，填写名字与性格，即可生成并安装新的桌宠角色包：
+当前二进制未进行商业代码签名，可能出现 SmartScreen 或安全软件提示。仅从本仓库 Release 获取文件；使用随包 `SHA256SUMS.txt` 核对完整性。
 
-- 基础孵化：1 张身份稿 + 4 个核心状态，共 5 次图像生成，适合先验证风格。
-- 标准孵化：1 张身份稿 + 19 个标准状态，共 20 次图像生成，产出真正的 v2 标准级角色包。
-- 完整孵化：1 张身份稿 + 44 个状态，共 45 次图像生成，补齐移动、跳跃、高级反馈与四向贴边资源。
-- 调用预算：开始前二次确认计划量和硬上限，任务列表持续显示已用次数；到达上限会在下一次调用前安全停止。
-- 安全镜像：仅当用户明确确认角色左右完全对称时启用，完整孵化可减少 6 次调用；单侧配饰、文字或不对称角色不得启用。
-- 能力预检：首次生成前检查接口 URL、图像编辑方法、模型和质量参数，并按端点与模型缓存结果。
-- 受控重试：仅对限流、超时、连接失败、无效图片响应和 5xx 异常进行 1 秒、2 秒指数退避；认证、权限和请求错误立即停止。
-- 批次健康：实时显示任务完成度、预算、健康状态与基于真实调用耗时计算的剩余时间。
-- 诊断报告：失败、QA 待返工和最终审核阶段自动生成 JSON，汇总错误分类、失败任务、预检结果和关联 QA 报告。
-- 问题反馈：可复制脱敏技术摘要或 GitHub Issue 模板，并导出只含诊断和 QA JSON 摘要的匿名问题 ZIP。
-- 永久卡通约束：无论参考图是真人、动物或照片，最终都只生成虚构的卡通数字伙伴。
-- 支持 1–4 张参考图；图片 API Key 优先保存在 Windows Credential Manager。
+## 对话、记忆与工具
 
-伙伴工坊新生成角色使用 v2 格式和统一的 `192 × 208` 画布；基础孵化标记为基础级，
-标准孵化只有在 19 个规定状态全部齐全时才标记为标准级，完整孵化则必须具备全部
-44 个规定状态。界面会在开始前明确显示图像生成次数；实际费用与耗时取决于所选接口、
-模型和质量。默认硬预算会在初始计划外预留 3 次返工；预算耗尽后可在继续任务时由用户
-主动提高，不会静默追加调用。镜像结果作为带来源记录的候选版本保存，不计入 API 调用；
-右向源动作返工或切换候选后，相关左向派生动作会自动失效并重新镜像。每次孵化都会
-保存阶段、审核决定、动作任务、尝试次数和产物记录。身份稿会先暂停等待确认，
-参考图会复制进任务工作区；失败或退出后可从未完成任务继续，也可只重试失败动作；
-四个核心动作会经过一致性审核，全部已选模式动作还会通过自动 QA。QA 会生成 JSON 报告和
-动作接触表，发现空图、裁切、重复动作等阻断问题时必须先返工。每次生成和返工都会
-保留原始响应与规范化精灵，可在审核界面或任务工具中切换历史候选；最终预览确认后
-才会安装。通过静态 QA 的关键姿态会围绕统一锚点生成保守的多帧微动作，再接受帧级
-运动 QA；完整模式还会在扩展生成前把 `run_right` 纳入核心一致性审核。安装前可逐动作
-播放 GIF 循环预览。升级前创建的 9 动作任务仍可按原任务
-恢复和完成，但不会被错误提升为标准级。
+- 支持兼容 Chat Completions 的接口、流式回答和 Tool Calls。
+- 每个角色拥有独立会话；可查看、导出 Markdown／JSON 或删除指定历史。
+- 历史保留可选不保存、7 天、30 天或永久。
+- 长期记忆仅保存逐条确认的内容，按角色隔离，并可查看回答使用的记忆。
+- 提供快速／均衡／深入预设，以及停止生成、重试、编辑重发和延迟／token／费用估算。
+- 内置算式、时间、系统与磁盘信息、HTTP(S) 网页和白名单应用工具。
+- 打开网页或应用需逐次确认；可在本次运行中记住完全相同工具与参数的决定。
+- 工具审计可查看、导出或清除；L2 状态修改与 L3 高风险工具默认禁用。
 
-所有自动重试都先占用一格调用预算，并记录任务、成功/失败、错误分类、重试序号和
-耗时；任务列表会显示累计调用量与接口耗时。兼容接口未实现模型查询端点时，预检只会
-标记为“无法验证”，随后由首次图像请求确认能力，不会直接拒绝该接口。
+费用估算和接口能力检查不等于服务商账单或能力保证。首次发送前应检查目标地址与发送范围。
 
-剩余时间使用当前任务的真实历史数据估算：累计调用耗时除以成功调用数，再乘以剩余
-真实调用数；安全镜像任务不会被重复计入。流程停在身份、核心动作、QA 或安装确认时，
-界面会明确显示“等待审核”，此时 ETA 表示用户批准后的预计生成时间。
+## 用参考图生成角色
 
-匿名问题包使用严格允许列表构建，不会递归压缩任务目录。它不包含参考图、生成图片、
-候选文件、接触表、API Key、角色名字、性格、风格描述或原始错误文本；本地路径、
-URL 凭据和查询参数会被清除，工作区外的报告路径会被拒绝。
-包内清单记录每个 JSON 的大小和 SHA-256；“检查问题包”会在不解压的情况下验证白名单、
-路径安全、体积、哈希、匿名编号和隐私结构，内容与清单不一致或夹带额外附件时会被拒绝。
+在伙伴工坊中添加 1–4 张参考图，填写名字与性格，再选择生成范围。生成结果限于虚构卡通数字伙伴。
 
-默认使用 OpenAI Image API 的 `gpt-image-2`，也可填写兼容的接口地址与模型名。
+| 模式 | 计划图像调用 | 角色状态 |
+| --- | --- | --- |
+| 基础 | 5 次 | 1 张身份稿＋4 个核心状态 |
+| 标准 | 20 次 | 1 张身份稿＋19 个标准状态 |
+| 完整 | 45 次 | 1 张身份稿＋44 个状态 |
+
+实际调用还可能包含重试与返工。开始前会确认计划和硬上限；默认额外预留 3 次返工，达到预算后停止，增加预算需用户操作。
+
+身份稿、核心动作和最终安装都有审核环节。任务支持中断恢复、失败动作重试、候选版本切换、静态与运动 QA，以及安装前 GIF 预览。认证或请求错误会停止；符合条件的临时错误按受控退避重试，每次重试计入预算。
+
+仅在用户确认角色左右完全对称时启用安全镜像，完整模式可减少 6 次生成；单侧配饰或文字不适用。源动作变化后对应镜像候选会失效。剩余时间基于实际任务耗时估算，等待人工审核的时间不在其中。
+
+参考图会复制到本地任务目录。图像生成会把必要参考与描述发送到所配置接口，价格、速度和能力由服务商及模型决定。详细阶段见 [工坊状态机](docs/PET_GENERATION_STATE_MACHINE.md)。
 
 ## 角色包
 
-角色包是 ZIP，必须包含：
+角色 ZIP 需要 `character.md`（YAML Front Matter 元数据、人设和动作映射）及 PNG／WebP／JPG 资源。
 
-- `character.md`：YAML Front Matter 格式的角色信息、人设与动作映射。
-- PNG / WebP / JPG 图片：支持每个动作多帧。
+v2 角色使用 `192 × 208` 画布，支持独立帧、动作条与图集。基础、标准、完整级分别检查所需状态，旧版 9 动作工坊任务可继续完成，但不会自动升级为标准级。首批官方角色使用 8×9 透明图集。
 
-完整格式见 [CHARACTER_PACKAGE_SPEC.md](CHARACTER_PACKAGE_SPEC.md)；新版角色、动画、
-贴边、人设和 QA 的设计基线见
-[PIXKIN_DESIGN_SPEC_V2.md](PIXKIN_DESIGN_SPEC_V2.md)。
+山山、凛凛、Pip 随包内置；椰子作为独立 ZIP 提供。内置角色不可删除，删除正在使用的自定义角色会切回山山。设置支持跟随 Windows、浅色和深色主题。
 
-v1 兼容动作：
+导入时检查路径穿越、符号链接、数量与解压体积。官方包通过内置 SHA-256 清单验证；第三方包展示作者、许可与指纹，但作者声明不自动获得信任。
 
-`idle`、`blink`、`stretch`、`wave`、`nod`、`sleep`、`dragging`、
-`edge_docked`、`talking`、`alerting`。
+[角色包格式](CHARACTER_PACKAGE_SPEC.md) · [v2 设计说明](PIXKIN_DESIGN_SPEC_V2.md)
 
-即使动作只有单张图，Pixkin 也会叠加轻微呼吸、点头、挥手、说话和提醒动效。
-v2 角色包支持独立帧、动作条和图集，并按基础级、标准级、完整级声明能力；
-多帧 v2 动画不会再叠加旧版整体变形。
-导入器会检查路径穿越、符号链接、文件数量和解压大小，避免恶意 ZIP 覆盖用户文件。
-设置中心支持跟随 Windows、深色和浅色三种界面主题。
-角色管理页支持导入、切换、重命名和删除；内置角色山山、凛凛与 Pip 不可删除，
-删除当前自定义角色时会自动切回山山。椰子不再自动安装，只作为
-`椰子.zip` 角色包供用户按需导入。
+## 语音、快捷键与直播提醒
 
-首批四个角色包均使用统一的 8×9、单格 `192×208` 透明图集和完整级动作映射。
-山山、凛凛、Pip 随发行版内置；椰子采用相同质量标准，但仅以独立 ZIP 交付。
+语音默认关闭，仅按住说话时访问麦克风；录音在内存中，通过独立 HTTPS 接口转写。转写文本先进入输入框，用户确认后才发送给聊天模型。支持显示／隐藏、打开聊天、停止生成与麦克风静音快捷键。
 
-## AI 与工具
+可同时监听多个 B 站和抖音直播间，支持分组、跨午夜免打扰与可选重复提醒。通常在未开播变为开播时提醒，也可设置启动时提醒。平台凭据按房间隔离，外部适配器需显式启用。平台接口变化可能影响检测，不能保证每次开播都及时通知。
 
-- 支持 OpenAI-compatible Chat Completions 与流式回复。
-- 支持模型 Tool Calls。
-- 内置安全算式、时间、系统与磁盘信息、HTTP(S) 网页和白名单应用等工具。
-- 打开网页或应用会在主线程逐次确认；可对完全相同的工具与参数记住本次运行决定。
-- 设置中心可查看、导出和清除带容量上限的脱敏工具审计。
-- 每个角色拥有独立的本地会话与上下文，切换角色不会丢失原角色记录。
-- “聊天时光胶囊”支持按角色、按日期查看，并导出 Markdown 或 JSON。
-- 支持开启新话题而保留旧记录，以及清空本次、所选日期、当前角色或全部历史。
-- 历史可选择不保存、保留 7 天、30 天或永久，并支持导出后删除所见。
-- 角色包内的 `system_prompt` 可定义名字、语气和人格。
-- 可控长期记忆只保存逐条确认项，按角色隔离；每次回答可查看实际使用的记忆。
-- 支持快速/均衡/深入预设、停止生成、失败重试、编辑重发，以及延迟/token/费用估算。
-- 模型任务会在发送前检查流式和 Tool Calls 能力。
+直播检测借鉴 [fideo-live-record](https://github.com/chenfan0/fideo-live-record) 的插件与 URL 路由思路，本项目不包含录流功能。
 
-## 语音与快捷键
+## 数据与隐私
 
-- 语音默认关闭；启用后只有按住说话期间访问麦克风，松开后立即停止。
-- 录音只驻留内存，使用独立 HTTPS 转写端点和独立 Windows 凭据。
-- 转写文本先进入输入框，由用户确认后再发送聊天。
-- 支持显示/隐藏、打开聊天、停止生成和麦克风静音四类全局快捷键。
+- 角色、设置和日志位于 `%LOCALAPPDATA%/Pixkin`；历史位于 `chat-history.sqlite3`。
+- 旧 `%LOCALAPPDATA%/DesktopPet` 数据在首次运行时迁移。
+- API Key 持久化到 Windows Credential Manager，也可仅在当前运行的内存中保存。
+- 历史默认存于本机；请求回答时会按所选上下文发送给配置的模型服务。
+- 日志、工具审计和诊断会脱敏常见密钥格式；分享前仍应人工检查。
+- 匿名问题 ZIP 使用文件允许列表，不包含参考图、生成图片、角色名字、人设或 API Key，并校验大小和 SHA-256；不要用整个任务目录替代匿名问题包。
 
-## 开播监听
+## 源码运行与测试
 
-- 支持同时添加多个 B 站与抖音直播间。
-- 每轮并发查询，慢平台不会阻塞其他直播间。
-- 仅在“未开播 → 开播”状态变化时弹出开播提醒气泡。
-- 可选择程序启动时发现正在直播也提醒。
-- 支持房间分组、跨午夜免打扰、静默结束后补提醒和可选重复提醒。
-- 平台凭据按房间隔离保存；配置中的明文 cookie 不会被内置 Provider 使用。
-- 外部平台适配器必须显式启用并通过 URL 安全和能力契约。
-
-实现结构参考了
-[chenfan0/fideo-live-record](https://github.com/chenfan0/fideo-live-record)
-的“平台 crawler 插件 + URL 路由”思路；本项目独立实现状态检测，不包含录流代码。
-
-## 隐私与兼容
-
-- 角色包、设置、日志保存在 `%LOCALAPPDATA%\Pixkin`。
-- 聊天历史保存在本机 `%LOCALAPPDATA%\Pixkin\chat-history.sqlite3`，不会自动上传。
-- 老版 `%LOCALAPPDATA%\DesktopPet` 数据会在首次运行时迁移。
-- API Key 只持久化到 Windows Credential Manager，也可选择仅本次运行保存在内存。
-- 首次发送给模型前会展示目标接口、发送范围和本地保存说明。
-- 日志、聊天数据库、工具审计和问题包会脱敏常见密钥格式。
-- 官方角色包由内置 SHA-256 清单验证；第三方包安装前显示作者、许可、资源数和指纹。
-- 独立角色检查器可在不安装时预览、检查兼容性和完整指纹；第三方作者声明不自动受信。
-- L2 状态修改和 L3 高风险工具默认禁用。
-- 当前构建目标为 Windows 10 / 11 x64。
-
-## 源码运行
-
-建议使用 Python 3.11：
+需要 Python 3.11。图片、视频、图集和角色 ZIP 使用 Git LFS；克隆前安装 Git LFS，并确保资产已下载。
 
 ```powershell
+git lfs install
+git clone https://github.com/rowanjove/pixkin.git
+cd pixkin
+git lfs pull
 py -3.11 -m pip install -r requirements.txt
 py -3.11 main.py
 ```
 
-## 测试
-
-安装锁定的开发与构建依赖：
+完整开发／构建依赖与质量检查：
 
 ```powershell
 py -3.11 -m pip install --require-hashes -r requirements-lock.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_quality.ps1
 ```
 
-推荐运行统一质量门禁：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_quality.ps1
-```
-
-该脚本会依次检查版本元数据、源码编译、Ruff、Pyright、全量测试和分支覆盖率；
-当前覆盖率门槛为 70%。
-
-只运行测试时：
+质量检查包括版本元数据、编译、Ruff、Pyright、测试和分支覆盖率，覆盖率门槛为 70%。仅运行测试：
 
 ```powershell
 $env:QT_QPA_PLATFORM='offscreen'
 py -3.11 -m pytest -q
 ```
 
-当前应用版本统一定义在 `core/version.py`。修改版本后运行：
+## 构建 Windows 发行版
 
 ```powershell
-py -3.11 scripts\generate_version_info.py
+powershell -ExecutionPolicy Bypass -File scripts/build_release.ps1
 ```
 
-CI 会使用带哈希的锁定依赖，检查 Windows 版本资源、Ruff、Pyright、测试覆盖率和
-依赖漏洞，生成 SBOM，并在隔离用户目录中完成 PyInstaller 文件夹版的自动启动和
-正常退出冒烟。兼容矩阵覆盖 Windows Server 2022/2025 与 100%/200% Qt 缩放，
-同时验证负坐标副屏的位置恢复和浮层边界；Windows 10/11 实机显示器热插拔等场景
-仍按发布清单人工验收。
-图片、视频、图集和角色 ZIP 使用 Git LFS 管理。
+`release/` 包含程序、角色 ZIP、角色规范、SBOM、SHA-256 清单，以及正式发布所需更新元数据。版本以 `core/version.py` 为准，修改后运行：
 
-架构解耦的依赖规则、已迁移模块和回滚边界见
-[`docs/M8_ARCHITECTURE.md`](docs/M8_ARCHITECTURE.md)。
-安全、隐私、工具授权和角色包信任边界见
-[`docs/M9_SECURITY.md`](docs/M9_SECURITY.md)。
-稳定性、诊断、数据恢复和性能基线见
-[`docs/M10_STABILITY.md`](docs/M10_STABILITY.md)。
-安装、签名更新、回滚和发布密钥运维见
-[`docs/M11_INSTALL_UPDATE.md`](docs/M11_INSTALL_UPDATE.md)。
-可控记忆、语音快捷键、角色生态、AI 体验和直播提醒扩展见
-[`docs/M12_PRODUCT_CAPABILITIES.md`](docs/M12_PRODUCT_CAPABILITIES.md)。
+```powershell
+py -3.11 scripts/generate_version_info.py
+```
 
 修改顶层依赖后重新生成锁定文件：
 
 ```powershell
-py -3.11 -m piptools compile --generate-hashes --strip-extras `
-  --output-file requirements-lock.txt requirements-build.txt
+py -3.11 -m piptools compile --generate-hashes --strip-extras --output-file requirements-lock.txt requirements-build.txt
 ```
 
-## 构建 Windows 发行版
+CI 的隔离启动、系统及缩放矩阵不能替代 Windows 10/11 真机显示器热插拔等人工验收。发布前完成 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)。
 
-```powershell
-py -3.11 -m pip install --require-hashes -r requirements-lock.txt
-powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
-```
+## 进一步阅读与许可状态
 
-构建结果：
+[架构](docs/M8_ARCHITECTURE.md) · [安全边界](docs/M9_SECURITY.md) · [稳定性与恢复](docs/M10_STABILITY.md) · [安装、更新与回滚](docs/M11_INSTALL_UPDATE.md) · [产品能力](docs/M12_PRODUCT_CAPABILITIES.md)
 
-```text
-release/
-├─ Pixkin-1.3.0-win64.zip
-├─ Pixkin-Portable-1.3.0.exe
-├─ Pixkin-Setup-1.3.0.exe
-├─ update-stable.json（正式 Release）
-├─ shanshan.zip、linlin.zip、pip.zip
-├─ yeye.zip（椰子角色包）
-├─ CHARACTER_PACKAGE_SPEC.md
-├─ SBOM.cdx.json
-└─ SHA256SUMS.txt
-```
-
-文件夹版使用 PyInstaller onedir，兼容性与启动速度更好；便携版使用 onefile。
-当前二进制未进行商业代码签名，因此在部分电脑上可能出现 Windows SmartScreen 提示。
-正式发布前应逐项完成 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)。
+界面与专题文档以中文为主。仓库当前未附独立 LICENSE 文件；本次文档不新增或推定代码及角色素材的再分发许可。第三方角色还应核对各自作者与许可。
