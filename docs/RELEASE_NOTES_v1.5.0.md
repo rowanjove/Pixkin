@@ -1,56 +1,40 @@
 # Pixkin v1.5.0
 
-Pixkin v1.5.0 is the public release for the Capability 2.0 milestone. It keeps
-the public version line at 1.5 while completing the runtime, privacy, recovery,
-character ecosystem, and release hardening work.
+Pixkin v1.5.0 是 Capability 2.0 能力里程碑版本，完成运行时、隐私、恢复、角色生态和发布加固工作。
 
-## Highlights
+## 主要变化
 
-- Unified `PixkinKernel`, service container, event bus, action dispatcher, and
-  provider registry lifecycle boundaries.
-- Default-deny desktop context permissions for window, process, idle, clipboard,
-  screen, microphone, plugin, MCP, filesystem, network, and external actions.
-- Explicit model-data-scope notice with re-confirmation when the authorized
-  context or memory scope changes.
-- Per-character chat history, retention controls, export/delete flows, bounded
-  memory, redacted tool audits, crash diagnostics, and atomic local backups.
-- Resumable character generation with planned-call budgets, bounded retries,
-  identity/core/QA/final review gates, candidate history, static and motion QA,
-  and safe installation only after review.
-- v2 character packages with the unified `192 × 208` canvas, multi-frame
-  animation, and official SHA-256 verification.
-- Separate voice input/output boundaries, push-to-talk capture, interruption,
-  global shortcuts, live-room monitoring, and strict plugin/MCP permission checks.
-- Signed HTTPS update-manifest protocol, downgrade protection, user-data backup,
-  rollback metadata, and a per-user Inno Setup installer.
+- 统一 `PixkinKernel`、服务容器、事件总线、动作分发器和 provider registry 的生命周期边界。
+- 桌面上下文权限默认拒绝，覆盖窗口、进程、空闲状态、剪贴板、屏幕、麦克风、插件、MCP、文件系统、网络和外部动作。
+- 授权上下文或记忆范围变化时显示模型数据范围提示并要求重新确认。
+- 提供按角色隔离的聊天历史、保留策略、导出/删除、受限记忆、脱敏工具审计、崩溃诊断和原子本地备份。
+- 支持可恢复角色生成：计划调用预算、有限重试、身份/核心/QA/最终审核门禁、候选历史、静态/动作 QA，审核后才能安全安装。
+- v2 角色包采用统一的 `192 × 208` 画布，支持多帧动画和官方 SHA-256 校验。
+- 分离语音输入与输出边界，支持按住说话、打断、全局快捷键、直播间监控和严格的插件/MCP 权限检查。
+- 提供签名 HTTPS 更新清单、降级防护、用户数据备份、回滚元数据和 per-user Inno Setup 安装器。
 
-## Windows assets
+## Windows 发布文件
 
-- `Pixkin-1.5.0-win64.zip` — recommended onedir build.
-- `Pixkin-Portable-1.5.0.exe` — single-file portable build.
-- `Pixkin-Setup-1.5.0.exe` — per-user installer.
-- `shanshan.zip`, `linlin.zip`, and `pip.zip` — character packages.
-- `SBOM.cdx.json` — CycloneDX dependency inventory.
-- `SHA256SUMS.txt` — SHA-256 checksums for every release asset in the package.
-- `update-stable.json` — signed stable-channel update manifest.
+- `Pixkin-1.5.0-win64.zip` — 推荐的 onedir 文件夹版。
+- `Pixkin-Portable-1.5.0.exe` — 单文件便携版。
+- `Pixkin-Setup-1.5.0.exe` — 当前用户安装器。
+- `shanshan.zip`、`linlin.zip`、`pip.zip` — 角色包。
+- `SBOM.cdx.json` — CycloneDX 依赖清单。
+- `SHA256SUMS.txt` — 发布文件 SHA-256 校验值。
+- `update-stable.json` — stable 渠道签名更新清单。
 
-## Verification
+## 验证结果
 
-- 459 tests passed; 46 subtests passed.
-- Branch coverage: 75.03% (70% release threshold).
-- Ruff, architecture checks, and Pyright on Python 3.11 passed.
-- Folder, portable, and installer builds completed on Windows 10 x64.
-- Folder and portable packaged startup/exit smoke tests passed in isolated
-  application-data directories.
-- `pip-audit` reported no known vulnerabilities for `requirements-lock.txt`.
-- The update manifest signature was verified with the repository public key.
+- 454 个测试通过；44 个 subtests 通过。
+- 总覆盖率 74.53%（发布门槛 70%）。
+- Python 3.11 下 Ruff、架构检查和 Pyright 通过。
+- Windows 10 x64 完成文件夹版、便携版和安装器构建。
+- 在隔离应用数据目录下，文件夹版和便携版启动/退出冒烟测试通过。
+- `pip-audit` 未发现 `requirements-lock.txt` 中的已知漏洞。
+- 更新清单签名已使用仓库公钥复验。
 
-## Known limitations
+## 已知限制
 
-- Binaries are not commercially code-signed; Windows SmartScreen may display a
-  warning on first launch.
-- Real microphone, external model, live-platform, multi-monitor hot-plug, and
-  clean-machine compatibility checks remain manual acceptance scenarios.
-- The application sends only the user-authorized context to the configured
-  provider, but it is not an offline AI application; provider charges and
-  retention policies depend on the selected service.
+- 二进制未进行商业代码签名，首次启动可能出现 Windows SmartScreen 警告。
+- 真实麦克风、外部模型、直播平台、多显示器热插拔和干净机器兼容性仍需人工验收。
+- 仅向配置的 provider 发送用户授权的上下文；应用不是离线 AI，provider 费用和数据保留策略取决于所选服务。
