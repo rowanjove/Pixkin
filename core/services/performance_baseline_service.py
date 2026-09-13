@@ -48,6 +48,10 @@ class PerformanceBaselineService:
 
     @classmethod
     def validate(cls, baseline: dict) -> None:
+        if not isinstance(baseline, dict):
+            raise PerformanceBaselineError(
+                "性能基线根节点必须是对象"
+            )
         if baseline.get("schema_version") != cls.SCHEMA_VERSION:
             raise PerformanceBaselineError(
                 "性能基线版本不兼容"
@@ -101,7 +105,7 @@ class PerformanceBaselineService:
             baseline = json.loads(
                 Path(source).read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PerformanceBaselineError(
                 "性能基线无法读取"
             ) from exc

@@ -19,6 +19,11 @@ from core.providers.image.base import (
 from core.providers.image.openai_compatible import (
     OpenAICompatibleImageProvider,
 )
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionResource,
+    PermissionState,
+)
 
 
 class FakeImageProvider(ImageProvider):
@@ -128,6 +133,28 @@ class ImageProviderTests(unittest.TestCase):
         self.assertEqual(health.status, "unverified")
         self.assertFalse(provider.capabilities.model_lookup)
 
+    def test_provider_rejects_insecure_or_credentialed_endpoints(self):
+        client = SimpleNamespace(
+            images=SimpleNamespace(edit=lambda **_kwargs: None),
+            models=SimpleNamespace(),
+        )
+        for endpoint in (
+            "http://images.example.test/v1",
+            "https://user:secret@images.example.test/v1",
+            "https://images.example.test/v1?token=leak",
+            "https://images.example.test/v1#fragment",
+        ):
+            with self.subTest(endpoint=endpoint):
+                provider = OpenAICompatibleImageProvider(
+                    api_key="test",
+                    base_url=endpoint,
+                    model="custom-image",
+                    quality="low",
+                    client=client,
+                )
+                with self.assertRaises(ValueError):
+                    provider.validate()
+
     def test_official_model_lookup_failure_is_blocking(self):
         error = RuntimeError("missing model")
         error.status_code = 404
@@ -177,6 +204,37 @@ class ImageProviderTests(unittest.TestCase):
         self.assertEqual(details.category, "invalid_response")
         self.assertTrue(details.retriable)
 
+    def test_oversized_base64_response_is_rejected_before_decode(self):
+        client = SimpleNamespace(
+            images=SimpleNamespace(edit=MagicMock(
+                return_value=SimpleNamespace(
+                    data=[SimpleNamespace(
+                        b64_json="A" * (
+                            4 * (
+                                (OpenAICompatibleImageProvider.MAX_IMAGE_BYTES + 2)
+                                // 3
+                            )
+                            + 1
+                        )
+                    )]
+                )
+            )),
+            models=SimpleNamespace(),
+        )
+        provider = OpenAICompatibleImageProvider(
+            api_key="test",
+            base_url="https://images.example.test/v1",
+            model="custom-image",
+            quality="low",
+            client=client,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.png"
+            reference.write_bytes(b"fixture")
+            with self.assertRaisesRegex(RuntimeError, "超过 20 MB 上限"):
+                provider.edit([reference], "prompt")
+
     def test_worker_runs_with_provider_contract_without_sdk(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -184,6 +242,12 @@ class ImageProviderTests(unittest.TestCase):
             reference.write_bytes(self._image_bytes())
             store = PetGenerationRunStore(base / "runs")
             provider = FakeImageProvider(self._image_bytes())
+            permissions = ContextPermissionService()
+            permissions.set_state(
+                PermissionResource.NETWORK,
+                PermissionState.ALLOW_SESSION,
+                session_only=True,
+            )
             worker = PetGenerationWorker(
                 api_key="unused",
                 base_url=provider.endpoint,
@@ -196,6 +260,7 @@ class ImageProviderTests(unittest.TestCase):
                 generation_mode="basic",
                 run_store=store,
                 image_provider=provider,
+                permission_service=permissions,
             )
 
             worker.run()

@@ -63,3 +63,5 @@ class PerformanceBaselineTests(unittest.TestCase):
             PerformanceBaselineService.validate(
                 {"schema_version": 2, "metrics": {}}
             )
+        with self.assertRaises(PerformanceBaselineError):
+            PerformanceBaselineService.validate([])

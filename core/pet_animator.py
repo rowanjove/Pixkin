@@ -154,7 +154,6 @@ class PetAnimator(QObject):
             PetState.RUN_LEFT: 1050,
             PetState.RUN_RIGHT: 1050,
             PetState.JUMP: 900,
-            PetState.HAPPY: 1300,
         }
 
         self._random_timer = QTimer(self)

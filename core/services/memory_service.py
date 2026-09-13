@@ -28,6 +28,11 @@ class MemoryRecord:
     enabled: bool
     created_at: str
     updated_at: str
+    kind: str = "profile"
+    source_type: str = "explicit"
+    status: str = "active"
+    importance: float = 0.5
+    last_used_at: str = ""
 
 
 class MemoryService:
@@ -176,7 +181,9 @@ class MemoryService:
             if len(selected) >= self.MAX_INJECTED_RECORDS:
                 break
             extra = len(item.content)
-            if selected and characters + extra > self.MAX_INJECTED_CHARS:
+            if extra > self.MAX_INJECTED_CHARS:
+                continue
+            if characters + extra > self.MAX_INJECTED_CHARS:
                 break
             selected.append(item)
             characters += extra
@@ -252,6 +259,8 @@ class MemoryService:
             return
         try:
             document = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise MemoryStoreError("长期记忆根节点必须是对象")
             if document.get("schema_version") != self.SCHEMA_VERSION:
                 raise MemoryStoreError("长期记忆版本不兼容")
             records = document.get("records")
@@ -273,7 +282,13 @@ class MemoryService:
                 loaded.append(record)
             self._enabled = bool(document.get("enabled", True))
             self._records = loaded
-        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        except (
+            OSError,
+            KeyError,
+            TypeError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise MemoryStoreError("长期记忆文件无法读取") from exc
 
     def _save(

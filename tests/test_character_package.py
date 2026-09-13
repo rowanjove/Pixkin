@@ -99,6 +99,18 @@ class CharacterPackageTests(unittest.TestCase):
                 manager.get_active().package_id, "shanshan"
             )
 
+    def test_directory_metadata_invalid_utf8_is_domain_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = ConfigManager(str(base / "config.json"))
+            manager = CharacterPackageManager(config, base / "characters")
+            package_root = base / "characters" / "broken"
+            package_root.mkdir(parents=True)
+            (package_root / "character.md").write_bytes(b"\xff")
+
+            with self.assertRaisesRegex(CharacterPackageError, "UTF-8"):
+                manager._load_from_directory(package_root)
+
     def test_failed_replace_activation_restores_previous_package(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -499,6 +511,34 @@ class CharacterPackageTests(unittest.TestCase):
                 CharacterPackageError, "累计像素"
             ):
                 manager._load_from_directory(package_root)
+
+
+    def test_v3_identity_and_runtime_sections_are_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "nova-v3"
+            for state in ("idle", "talking", "dragging", "alerting"):
+                self._write_png(root / "images" / f"{state}.png")
+            (root / "character.md").write_text(
+                "---\n"
+                "schema_version: '3.0'\n"
+                "identity:\n  id: nova-v3\n  name: Nova 3\n"
+                "persona:\n  identity: reliable\n"
+                "behavior: {}\nrenderer:\n  type: sprite\n"
+                "voice:\n  provider: windows_sapi\n"
+                "memory_policy: {}\ncapabilities: {}\n"
+                "animations:\n"
+                "  idle:\n    source:\n      type: frames\n      files: [images/idle.png]\n"
+                "  talking:\n    source:\n      type: frames\n      files: [images/talking.png]\n"
+                "  dragging:\n    source:\n      type: frames\n      files: [images/dragging.png]\n"
+                "  alerting:\n    source:\n      type: frames\n      files: [images/alerting.png]\n"
+                "---\n",
+                encoding="utf-8",
+            )
+            manager = CharacterPackageManager.__new__(CharacterPackageManager)
+            package = manager._load_from_directory(root)
+            self.assertEqual(package.schema_version, "3.0")
+            self.assertEqual(package.package_id, "nova-v3")
+            self.assertEqual(package.renderer["type"], "sprite")
 
 
 if __name__ == "__main__":

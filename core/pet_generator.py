@@ -27,6 +27,11 @@ from core.providers.image.openai_compatible import (
 )
 from core.pet_generation_run import PetGenerationRunStore
 from core.pet_generation_qa import PetGenerationQa
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionOperation,
+    PermissionResource,
+)
 from core.version import VERSION
 
 
@@ -189,6 +194,8 @@ class PetGenerationWorker(QThread):
         run_store: Optional[PetGenerationRunStore] = None,
         retry_task_id: Optional[str] = None,
         image_provider: Optional[ImageProvider] = None,
+        permission_service: Optional[ContextPermissionService] = None,
+        permission_token: Optional[str] = None,
     ):
         super().__init__()
         self.api_key = api_key
@@ -231,6 +238,12 @@ class PetGenerationWorker(QThread):
         self.run_id = run_id or ""
         self._run_store = run_store or PetGenerationRunStore()
         self.retry_task_id = retry_task_id
+        # Image generation is an external network side effect.  Keep the
+        # worker safe when embedded outside the desktop composition root by
+        # supplying a default-deny permission service instead of treating a
+        # missing service as implicit authorization.
+        self.permission_service = permission_service or ContextPermissionService()
+        self.permission_token = str(permission_token or "").strip() or None
         self._active_task_id = None
 
     @classmethod
@@ -242,6 +255,8 @@ class PetGenerationWorker(QThread):
         run_store: Optional[PetGenerationRunStore] = None,
         retry_task_id: Optional[str] = None,
         image_provider: Optional[ImageProvider] = None,
+        permission_service: Optional[ContextPermissionService] = None,
+        permission_token: Optional[str] = None,
     ):
         store = run_store or PetGenerationRunStore()
         record = store.load(run_id)
@@ -277,6 +292,8 @@ class PetGenerationWorker(QThread):
             run_store=store,
             retry_task_id=retry_task_id,
             image_provider=image_provider,
+            permission_service=permission_service,
+            permission_token=permission_token,
         )
 
     def cancel(self):
@@ -360,6 +377,17 @@ class PetGenerationWorker(QThread):
 
     def run(self):
         try:
+            decision = self.permission_service.decide(
+                PermissionResource.NETWORK,
+                PermissionOperation.WRITE,
+                resolve_ask=False,
+                consume_pending=True,
+                handoff_token=self.permission_token,
+            )
+            if not decision.allowed:
+                raise PermissionError(
+                    "网络权限未允许；请在隐私与审计中授权后重试。"
+                )
             pose_items = self._pose_items()
             slug = self._slug()
             if not self.run_id:

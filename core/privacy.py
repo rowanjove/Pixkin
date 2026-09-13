@@ -24,7 +24,32 @@ SENSITIVE_KEY_MARKERS = (
     "secret",
 )
 SENSITIVE_TOKEN_KEY_PATTERN = re.compile(r"(?:^|_)token(?:_|$)")
-PRIVACY_NOTICE_VERSION = 1
+PRIVACY_NOTICE_VERSION = 2
+MODEL_BASE_DATA_SCOPE = (
+    "system_prompt_user_message_recent_history_and_memories"
+)
+MODEL_CONTEXT_PERMISSION_KEYS = (
+    "window_metadata",
+    "system_state",
+    "clipboard",
+)
+
+
+def model_data_scope(permission_states: Mapping[str, Any] | None = None) -> str:
+    """Return the model notice scope, including currently allowed context.
+
+    The scope intentionally describes categories rather than values.  This
+    makes a consent decision reusable while still invalidating it whenever a
+    new desktop data source becomes allowed.
+    """
+    values = permission_states or {}
+    allowed_context = tuple(
+        key
+        for key in MODEL_CONTEXT_PERMISSION_KEYS
+        if str(values.get(key, "deny")) in {"allow_session", "allow_always"}
+    )
+    context_suffix = ",".join(allowed_context) or "none"
+    return f"{MODEL_BASE_DATA_SCOPE}|desktop_context:{context_suffix}"
 
 
 def normalized_endpoint(value: Any) -> str:

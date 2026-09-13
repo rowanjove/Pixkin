@@ -317,13 +317,19 @@ class ToolRegistryTests(unittest.TestCase):
         registry = ToolRegistry(
             ToolPermissionService(confirm_external=lambda _request: True)
         )
-        with patch(
-            "core.tool_registry.webbrowser.open", return_value=True
-        ) as open_url:
+        with patch.object(
+            registry, "_execute_isolated", return_value="已使用默认浏览器打开：https://example.com/path"
+        ) as execute_isolated:
             result = registry.execute_tool(
                 "open_url", {"url": "https://example.com/path"}
             )
         self.assertIn("已使用默认浏览器打开", result)
+        execute_isolated.assert_called_once()
+        with patch("core.tool_registry.webbrowser.open", return_value=True) as open_url:
+            self.assertIn(
+                "已使用默认浏览器打开",
+                registry._tool_open_url("https://example.com/path"),
+            )
         open_url.assert_called_once_with("https://example.com/path", new=2)
         self.assertIn(
             "Error executing tool",

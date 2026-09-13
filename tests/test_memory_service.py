@@ -123,6 +123,17 @@ class MemoryServiceTests(unittest.TestCase):
             self.assertEqual(service.list(), [])
             self.assertTrue(service.enabled)
 
+    def test_non_object_and_invalid_utf8_are_domain_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memories.json"
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(MemoryStoreError, "根节点"):
+                MemoryService(path)
+
+            path.write_bytes(b"\xff")
+            with self.assertRaises(MemoryStoreError):
+                MemoryService(path)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,15 @@ a = Analysis(
     noarchive=False,
     optimize=1,
 )
+# Qt6Core resolves the Windows ICU shim from System32.  The build environment
+# also exposes Poppler's ICU 78 DLLs on PATH; PyInstaller would otherwise copy
+# those incompatible versioned exports into the app and make QtCore fail to
+# load (Qt imports undecorated ICU symbols).  Keep the package aligned with the
+# previously shipped build and let the supported Windows runtime provide ICU.
+a.binaries = [
+    entry for entry in a.binaries
+    if not Path(str(entry[0])).name.lower().startswith("icu")
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

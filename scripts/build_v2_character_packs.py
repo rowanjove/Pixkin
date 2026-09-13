@@ -7,6 +7,7 @@ import math
 import shutil
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -188,8 +189,11 @@ DEFAULT_EDGE_ANIMATIONS = """\
 """
 
 
-def yeye_edge_animation(side: str) -> str:
-    files = [f"images/edge/{side}-{index:02d}.png" for index in range(6)]
+def yeye_edge_animation(side: str, *, art_side: str | None = None) -> str:
+    files = [
+        f"images/edge/{art_side or side}-{index:02d}.png"
+        for index in range(6)
+    ]
 
     def source(indices) -> str:
         selected = ", ".join(json.dumps(files[index]) for index in indices)
@@ -213,7 +217,7 @@ def yeye_edge_animation(side: str) -> str:
   edge_hover_{side}:
     source: {source((3, 4, 5, 4))}
     fps: 7
-    playback: ping_pong
+    playback: once
     anchor: [96, 104]
   edge_exit_{side}:
     source: {source((3, 2, 1, 0))}
@@ -224,7 +228,12 @@ def yeye_edge_animation(side: str) -> str:
 
 
 YEYE_EDGE_ANIMATIONS = "".join(
-    yeye_edge_animation(side)
+    yeye_edge_animation(
+        side,
+        art_side=(
+            {"left": "right", "right": "left"}.get(side, side)
+        ),
+    )
     for side in ("left", "right", "top", "bottom")
 )
 
@@ -283,7 +292,8 @@ behavior:
   cooldown_seconds:
 {cooldowns}
 {ANIMATIONS}{edge_animations}compatibility:
-  min_app_version: 2.0.0
+  min_app_version: 1.5.0
+  min_capability_version: 2.0.0
   atlas_layout: pixkin-8x9
 rights:
   license: project-distribution
@@ -306,7 +316,7 @@ def clean_green_spill(source: Path, target: Path) -> None:
     with Image.open(source) as opened:
         image = opened.convert("RGBA")
     cleaned = []
-    flat_data = getattr(image, "get_flattened_data", image.getdata)
+    flat_data: Any = getattr(image, "get_flattened_data", image.getdata)
     for red, green, blue, alpha in flat_data():
         if alpha <= 4:
             cleaned.append((0, 0, 0, 0))
@@ -360,7 +370,7 @@ def build_package(package_id: str, profile: dict) -> Path:
     )
 
     zip_path = PACKS / f"{package_id}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
         members = [
             package_dir / "character.md",
             package_dir / "spritesheet.webp",
@@ -371,7 +381,14 @@ def build_package(package_id: str, profile: dict) -> Path:
                 sorted((package_dir / "images" / "edge").glob("*.png"))
             )
         for path in members:
-            archive.write(path, arcname=path.relative_to(package_dir))
+            # Reproducible, metadata-free official archives: fixed DOS epoch
+            # timestamp, stored bytes, and no host-specific mode bits.
+            info = zipfile.ZipInfo(path.relative_to(package_dir).as_posix())
+            info.date_time = (1980, 1, 1, 0, 0, 0)
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 0
+            info.external_attr = 0
+            archive.writestr(info, path.read_bytes())
     return zip_path
 
 

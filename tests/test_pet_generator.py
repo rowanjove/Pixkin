@@ -27,6 +27,11 @@ from core.pet_generator import (
     STANDARD_POSE_IDS,
     PetGenerationWorker,
 )
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionResource,
+    PermissionState,
+)
 
 
 class FakeStatusError(RuntimeError):
@@ -36,6 +41,14 @@ class FakeStatusError(RuntimeError):
 
 
 class PetGeneratorTests(unittest.TestCase):
+    def setUp(self):
+        self.permissions = ContextPermissionService()
+        self.permissions.set_state(
+            PermissionResource.NETWORK,
+            PermissionState.ALLOW_SESSION,
+            session_only=True,
+        )
+
     @staticmethod
     def _generated_sprite_bytes(index):
         image = Image.new("RGB", (512, 512), (0, 255, 0))
@@ -85,6 +98,7 @@ class PetGeneratorTests(unittest.TestCase):
             style_notes="珊瑚色围巾",
             reference_paths=[reference],
             full_hatch=True,
+            permission_service=self.permissions,
         )
 
     @staticmethod
@@ -204,6 +218,7 @@ class PetGeneratorTests(unittest.TestCase):
                     root / "assets" / "pixkin" / "pip-avatar.png"
                 ],
                 generation_mode="standard",
+                permission_service=self.permissions,
             )
             animation_build = PetAnimationBuilder().build(
                 images=generated,
@@ -270,6 +285,7 @@ class PetGeneratorTests(unittest.TestCase):
                     root / "assets" / "pixkin" / "pip-avatar.png"
                 ],
                 generation_mode="full",
+                permission_service=self.permissions,
             )
             animation_build = PetAnimationBuilder().build(
                 images=generated,
@@ -327,6 +343,7 @@ class PetGeneratorTests(unittest.TestCase):
                 reference_paths=[reference],
                 generation_mode="standard",
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -362,6 +379,7 @@ class PetGeneratorTests(unittest.TestCase):
                 reference_paths=[reference],
                 generation_mode="full",
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -381,6 +399,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=run["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
 
             self.assertEqual(run["request"]["mode"], "full")
@@ -432,6 +451,7 @@ class PetGeneratorTests(unittest.TestCase):
                 generation_mode="basic",
                 max_api_calls=1,
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -450,6 +470,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=run["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
             errors = []
             resumed.error_occurred.connect(errors.append)
@@ -498,6 +519,7 @@ class PetGeneratorTests(unittest.TestCase):
                 generation_mode="basic",
                 max_api_calls=8,
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -596,6 +618,7 @@ class PetGeneratorTests(unittest.TestCase):
                 max_api_calls=8,
                 run_id=run["id"],
                 run_store=store,
+                permission_service=self.permissions,
             )
             first_client = MagicMock()
             first_client.images.edit = MagicMock()
@@ -613,6 +636,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=run["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
             second_client = MagicMock()
             second_client.images.edit = MagicMock()
@@ -657,6 +681,7 @@ class PetGeneratorTests(unittest.TestCase):
                 max_api_calls=10,
                 run_id=run["id"],
                 run_store=store,
+                permission_service=self.permissions,
             )
             pose_items = [
                 ("walk_right", FULL_POSES["walk_right"]),
@@ -763,6 +788,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=run["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
 
             self.assertEqual(resumed.generation_mode, "legacy_full")
@@ -788,6 +814,7 @@ class PetGeneratorTests(unittest.TestCase):
                 reference_paths=[reference],
                 full_hatch=False,
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -827,6 +854,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=runs[0]["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -859,6 +887,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=runs[0]["id"],
                 api_key="",
                 run_store=store,
+                permission_service=self.permissions,
             )
             with patch("core.pet_generator.OpenAI") as openai:
                 finalized.run()
@@ -919,6 +948,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=runs[0]["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -951,6 +981,7 @@ class PetGeneratorTests(unittest.TestCase):
                 reference_paths=[reference],
                 full_hatch=False,
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -968,6 +999,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=run["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -987,6 +1019,7 @@ class PetGeneratorTests(unittest.TestCase):
                 api_key="test",
                 run_store=store,
                 retry_task_id="idle",
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -1024,6 +1057,7 @@ class PetGeneratorTests(unittest.TestCase):
                 reference_paths=[reference],
                 full_hatch=False,
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -1050,6 +1084,7 @@ class PetGeneratorTests(unittest.TestCase):
                 api_key="test",
                 run_store=store,
                 retry_task_id="canonical",
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -1098,6 +1133,7 @@ class PetGeneratorTests(unittest.TestCase):
                 reference_paths=[reference],
                 full_hatch=False,
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -1124,6 +1160,7 @@ class PetGeneratorTests(unittest.TestCase):
                 api_key="test",
                 run_store=store,
                 retry_task_id="canonical",
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),
@@ -1169,6 +1206,7 @@ class PetGeneratorTests(unittest.TestCase):
                 run_id=run["id"],
                 api_key="test",
                 run_store=store,
+                permission_service=self.permissions,
             )
             with (
                 patch("core.pet_generator.OpenAI"),

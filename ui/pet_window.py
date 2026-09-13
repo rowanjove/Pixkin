@@ -49,6 +49,8 @@ class PetWindow(QWidget):
         self._state_started_tick = 0
         self._roam_animation = None
         self._roam_state = None
+        self._last_render_frame_key = None
+        self._tick_remainder = 0.0
         self.character_package = None
         self.character_renderer = PetRenderer(
             self.animator,
@@ -119,7 +121,22 @@ class PetWindow(QWidget):
         self.chat_window.apply_theme()
 
     def _next_frame(self):
-        self.tick += 1
+        # Keep the renderer's logical 25 Hz clock stable even when the
+        # adaptive timer is deliberately slower in low-FPS idle animations.
+        self._tick_remainder += self.anim_timer.interval() / 40.0
+        tick_delta = max(1, int(self._tick_remainder))
+        self._tick_remainder -= tick_delta
+        self.tick += tick_delta
+        if self.character_package is not None:
+            frame = self.character_renderer.current_package_frame(
+                self.animator.current_state.value,
+                tick=self.tick,
+                state_started_tick=self._state_started_tick,
+            )
+            frame_key = int(frame.cacheKey()) if frame is not None else None
+            if frame_key == self._last_render_frame_key:
+                return
+            self._last_render_frame_key = frame_key
         self.update()
 
     def _position_default(self):
@@ -174,6 +191,7 @@ class PetWindow(QWidget):
 
     def set_character(self, package: CharacterPackage):
         self.character_package = package
+        self._last_render_frame_key = None
         self.character_renderer.set_package(package)
         if package:
             behavior = dict(package.behavior)
@@ -204,7 +222,29 @@ class PetWindow(QWidget):
             self.animator.configure_animation_policies({})
             self.animator.configure_behavior({})
             self.chat_window.set_character("山山")
+        self._configure_animation_timer()
         self.update()
+
+    def _configure_animation_timer(self) -> None:
+        """Match timer cadence to the active package without slowing motion."""
+        interval_ms = 40
+        if self.character_package is not None:
+            entry = self.character_renderer.entry_for_state(
+                self.animator.current_state.value
+            )
+            animation = entry[1] if entry is not None else None
+            try:
+                fps = max(1.0, float(animation.fps))
+            except (AttributeError, TypeError, ValueError):
+                fps = 6.0
+            # A package's declared FPS is a visual upper bound.  Capping the
+            # redraw cadence prevents the idle window from waking 25 times a
+            # second while preserving the logical animation clock above.
+            interval_ms = max(100, min(200, round(1000.0 / fps)))
+        self._tick_remainder = 0.0
+        self.anim_timer.setInterval(interval_ms)
+        if not self.anim_timer.isActive():
+            self.anim_timer.start()
 
     def _is_edge_state(self):
         value = self.animator.current_state.value
@@ -619,6 +659,8 @@ class PetWindow(QWidget):
 
     def _on_state_changed(self, new_state):
         self._state_started_tick = self.tick
+        self._last_render_frame_key = None
+        self._configure_animation_timer()
         movement_states = {
             PetState.WALK_LEFT,
             PetState.WALK_RIGHT,

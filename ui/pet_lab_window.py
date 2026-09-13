@@ -27,6 +27,11 @@ from core.services.pet_lab_service import (
     PetLabService,
 )
 from core.services.session_secret_store import SessionSecretStore
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionOperation,
+    PermissionResource,
+)
 from ui.pet_lab_components import (
     CandidateSelectionDialog,
     PetLabHatchForm,
@@ -56,6 +61,8 @@ class PetLabWindow(QDialog):
         character_service: CharacterService = None,
         pet_lab_service: PetLabService = None,
         session_secret_store: SessionSecretStore = None,
+        context_permission_service: ContextPermissionService = None,
+        provider_catalog=None,
     ):
         super().__init__(parent)
         self.config_manager = config_manager
@@ -73,6 +80,13 @@ class PetLabWindow(QDialog):
         self.session_secret_store = (
             session_secret_store or SessionSecretStore()
         )
+        # Standalone embedders must keep the same default-deny boundary as the
+        # desktop composition root; a missing service must never authorize a
+        # generation request implicitly.
+        self.context_permission_service = (
+            context_permission_service or ContextPermissionService()
+        )
+        self.provider_catalog = provider_catalog or {}
         self.review_dialog_controller = PetLabReviewDialogController(
             parent=self,
             candidate_count=self._candidate_count,
@@ -427,6 +441,22 @@ class PetLabWindow(QDialog):
             QMessageBox.warning(self, issue.title, issue.message)
             return
 
+        permission_token = self.context_permission_service.new_handoff_token()
+        decision = self.context_permission_service.decide(
+            PermissionResource.NETWORK,
+            PermissionOperation.WRITE,
+            handoff_token=permission_token,
+        )
+        if not decision.allowed:
+            QMessageBox.warning(
+                self,
+                "网络权限未允许",
+                "伙伴工坊需要访问图像接口才能生成图片。"
+                "请先在“隐私与审计”中授权网络访问，再开始孵化。",
+            )
+            self._clear_generation_permission(permission_token)
+            return
+
         answer = QMessageBox.question(
             self,
             "确认图像调用预算",
@@ -440,6 +470,19 @@ class PetLabWindow(QDialog):
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
+            self._clear_generation_permission(permission_token)
+            return
+
+        try:
+            image_provider = self._create_image_provider(
+                api_key=form.api_key,
+                base_url=form.base_url,
+                model=form.model,
+                quality=form.quality,
+            )
+        except (KeyError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "图像 Provider 不可用", str(exc))
+            self._clear_generation_permission(permission_token)
             return
 
         previous_api_key = SecretStore.get_image_api_key()
@@ -469,6 +512,7 @@ class PetLabWindow(QDialog):
                     "Windows 凭据管理器仍保留旧 API Key；"
                     "为避免旧凭据覆盖新设置，本次孵化没有开始。",
                 )
+                self._clear_generation_permission(permission_token)
                 return
             if form.api_key and not credential_available:
                 QMessageBox.critical(
@@ -477,6 +521,7 @@ class PetLabWindow(QDialog):
                     "Windows 凭据管理器不可用。为避免明文密钥写入配置文件，"
                     "本次孵化没有开始；请修复凭据管理器后重试。",
                 )
+                self._clear_generation_permission(permission_token)
                 return
         config_saved = self.config_manager.update_section("image_generation", {
             "base_url": form.base_url,
@@ -503,6 +548,7 @@ class PetLabWindow(QDialog):
                 )
                 + "请检查磁盘空间和目录权限。",
             )
+            self._clear_generation_permission(permission_token)
             return
         if not form.session_only_key:
             self.session_secret_store.set_image_api_key("")
@@ -520,8 +566,43 @@ class PetLabWindow(QDialog):
             allow_horizontal_mirror=form.allow_horizontal_mirror,
             max_api_calls=form.max_api_calls,
             run_store=self.run_store,
+            image_provider=image_provider,
+            permission_service=self.context_permission_service,
+            permission_token=permission_token,
         )
         self._start_worker(worker)
+
+    def _clear_generation_permission(self, permission_token: str | None) -> None:
+        if not permission_token:
+            return
+        self.context_permission_service.clear_pending(
+            PermissionResource.NETWORK,
+            PermissionOperation.WRITE,
+            handoff_token=permission_token,
+        )
+
+    def _create_image_provider(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        quality: str,
+    ):
+        """Create image providers only through the application registry."""
+        registry = self.provider_catalog.get("image")
+        if registry is None:
+            # Keep standalone/legacy embedders working; the application
+            # composition root always supplies the registry.
+            return None
+        provider_id = registry.default_id or "openai_compatible"
+        return registry.create(
+            provider_id,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            quality=quality,
+        )
 
     def _start_worker(self, worker):
         self.worker = worker
@@ -1072,14 +1153,40 @@ class PetLabWindow(QDialog):
                 run_id,
                 {"max_api_calls": increased},
             )
+        permission_token = None
+        if needs_generation:
+            permission_token = self.context_permission_service.new_handoff_token()
+            decision = self.context_permission_service.decide(
+                PermissionResource.NETWORK,
+                PermissionOperation.WRITE,
+                handoff_token=permission_token,
+            )
+            if not decision.allowed:
+                QMessageBox.warning(
+                    self,
+                    "网络权限未允许",
+                    "继续生成需要访问图像接口，请先授权网络访问。",
+                )
+                self._clear_generation_permission(permission_token)
+                return
         try:
+            image_provider = self._create_image_provider(
+                api_key=api_key,
+                base_url=str(record.get("request", {}).get("image_base_url", "")),
+                model=str(record.get("request", {}).get("image_model", "gpt-image-2")),
+                quality=str(record.get("request", {}).get("image_quality", "medium")),
+            )
             worker = PetGenerationWorker.resume_from(
                 run_id=run_id,
                 api_key=api_key,
                 run_store=self.run_store,
                 retry_task_id=retry_task_id,
+                image_provider=image_provider,
+                permission_service=self.context_permission_service,
+                permission_token=permission_token,
             )
-        except PetGenerationRunError as exc:
+        except (PetGenerationRunError, KeyError, ValueError, RuntimeError) as exc:
+            self._clear_generation_permission(permission_token)
             self._on_error(str(exc))
             return
         self.active_run_id = run_id

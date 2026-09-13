@@ -81,6 +81,20 @@ def test_valid_signed_manifest_is_accepted(update_fixture):
     assert release.artifact.kind == "installer"
 
 
+def test_oversized_installer_is_rejected(update_fixture):
+    key, verifier, payload, _ = update_fixture
+    oversized = json.loads(json.dumps(payload))
+    oversized["artifacts"][0]["size"] = (
+        UpdateManifestVerifier.MAX_ARTIFACT_BYTES + 1
+    )
+    with pytest.raises(UpdateSecurityError, match="512 MiB"):
+        verifier.verify(
+            signed_manifest(key, oversized),
+            expected_channel="stable",
+            current_version="1.3.0",
+        )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -285,9 +299,14 @@ def test_install_requires_confirmation_and_verified_cache(update_fixture):
         current_version="1.3.0",
     )
     with tempfile.TemporaryDirectory() as directory:
-        target = Path(directory) / release.artifact.filename
-        target.write_bytes(installer)
-        service = UpdateService(verifier, directory)
+        service = UpdateService(
+            verifier,
+            directory,
+            session=FakeSession(
+                [FakeDownloadResponse(installer, release.artifact.url)]
+            ),
+        )
+        target = service.download_installer(release)
         with pytest.raises(UpdateSecurityError):
             service.launch_installer(target, user_confirmed=False)
         with mock.patch("subprocess.Popen") as popen:
@@ -295,6 +314,27 @@ def test_install_requires_confirmation_and_verified_cache(update_fixture):
         args = popen.call_args.args[0]
         assert args[0] == str(target.resolve())
         assert args[1:] == ["/CURRENTUSER", "/SP-", "/NORESTART"]
+
+
+def test_install_rechecks_receipt_bound_file_before_launch(update_fixture):
+    key, verifier, payload, installer = update_fixture
+    release = verifier.verify(
+        signed_manifest(key, payload),
+        expected_channel="stable",
+        current_version="1.3.0",
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        service = UpdateService(
+            verifier,
+            directory,
+            session=FakeSession(
+                [FakeDownloadResponse(installer, release.artifact.url)]
+            ),
+        )
+        target = service.download_installer(release)
+        target.write_bytes(b"tampered")
+        with pytest.raises(UpdateSecurityError):
+            service.launch_installer(target, user_confirmed=True)
 
 
 def test_install_mode_and_daily_check():

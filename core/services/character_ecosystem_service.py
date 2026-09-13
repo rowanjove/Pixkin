@@ -15,7 +15,7 @@ import requests
 
 from core.services.character_service import CharacterService
 from core.services.character_trust_service import OfficialCharacterTrustStore
-from core.version import VERSION
+from core.version import CAPABILITY_MILESTONE, VERSION
 
 
 class CharacterCatalogError(ValueError):
@@ -66,6 +66,8 @@ class CharacterCatalogEntry:
     source: str
     min_app_version: str
     max_app_version: str
+    min_capability_version: str = ""
+    max_capability_version: str = ""
 
     @property
     def official(self) -> bool:
@@ -81,23 +83,25 @@ class CharacterPackageInspector:
         trust_store: OfficialCharacterTrustStore | None = None,
         *,
         app_version: str = VERSION,
+        capability_version: str = CAPABILITY_MILESTONE,
     ):
         self.character_service = character_service
         self.trust_store = trust_store
         self.app_version = app_version
+        self.capability_version = capability_version
 
     def inspect(self, archive: str | Path) -> CharacterInspection:
-        plan = self.character_service.prepare_install(archive)
-        package = plan.package
+        archive_path = Path(archive).expanduser().resolve()
+        package = self.character_service.inspect_archive(archive_path)
         archive_name = Path(archive).name
         official = bool(
             self.trust_store
             and self.trust_store.verify(archive_name, archive)
         )
-        compatible, message = (
-            (True, "随当前 Pixkin 发布并通过官方哈希验证")
-            if official
-            else self._compatibility(package.compatibility)
+        compatible, message = self.character_service.compatibility_status(
+            package,
+            app_version=self.app_version,
+            capability_version=self.capability_version,
         )
         return CharacterInspection(
             package_id=package.package_id,
@@ -105,8 +109,8 @@ class CharacterPackageInspector:
             version=package.version,
             author=package.author,
             description=package.description,
-            fingerprint=plan.archive_sha256,
-            file_count=plan.archive_file_count,
+            fingerprint=self.character_service.archive_fingerprint(archive_path),
+            file_count=self.character_service.archive_file_count(archive_path),
             official=official,
             author_trusted=official,
             compatible=compatible,
@@ -115,22 +119,6 @@ class CharacterPackageInspector:
                 archive
             ),
         )
-
-    def _compatibility(self, value: dict) -> tuple[bool, str]:
-        if not isinstance(value, dict):
-            return True, "未声明版本限制"
-        minimum = str(value.get("min_app_version") or "")
-        maximum = str(value.get("max_app_version") or "")
-        try:
-            current = version_key(self.app_version)
-            if minimum and current < version_key(minimum):
-                return False, f"需要 Pixkin {minimum} 或更高版本"
-            if maximum and current > version_key(maximum):
-                return False, f"最高支持 Pixkin {maximum}"
-        except CharacterCatalogError:
-            return False, "角色包兼容性版本声明无效"
-        return True, "与当前 Pixkin 版本兼容"
-
 
 class CharacterCatalogService:
     """Validate official/third-party indexes without inheriting author trust."""
@@ -146,8 +134,10 @@ class CharacterCatalogService:
         self,
         *,
         app_version: str = VERSION,
+        capability_version: str = CAPABILITY_MILESTONE,
     ) -> list[CharacterCatalogEntry]:
         current = version_key(app_version)
+        current_capability = version_key(capability_version)
         return [
             item
             for item in self.entries
@@ -157,6 +147,16 @@ class CharacterCatalogService:
                     not item.max_app_version
                     or current <= version_key(item.max_app_version)
                 )
+                and (
+                    not item.min_capability_version
+                    or current_capability
+                    >= version_key(item.min_capability_version)
+                )
+                and (
+                    not item.max_capability_version
+                    or current_capability
+                    <= version_key(item.max_capability_version)
+                )
             )
         ]
 
@@ -165,6 +165,7 @@ class CharacterCatalogService:
         installed: list,
         *,
         app_version: str = VERSION,
+        capability_version: str = CAPABILITY_MILESTONE,
     ) -> list[CharacterCatalogEntry]:
         versions = {
             str(item.package_id): version_key(str(item.version))
@@ -172,7 +173,10 @@ class CharacterCatalogService:
         }
         return [
             item
-            for item in self.compatible_entries(app_version=app_version)
+            for item in self.compatible_entries(
+                app_version=app_version,
+                capability_version=capability_version,
+            )
             if (
                 item.package_id in versions
                 and version_key(item.version) > versions[item.package_id]
@@ -276,8 +280,10 @@ class CharacterCatalogService:
             document = json.loads(
                 self.catalog_path.read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CharacterCatalogError("角色目录无法读取") from exc
+        if not isinstance(document, dict):
+            raise CharacterCatalogError("角色目录根节点必须是对象")
         if document.get("schema_version") != self.SCHEMA_VERSION:
             raise CharacterCatalogError("角色目录版本不兼容")
         raw_entries = document.get("entries")
@@ -293,13 +299,21 @@ class CharacterCatalogService:
             sha256 = str(raw.get("sha256") or "").lower()
             source = str(raw.get("source") or "")
             archive_url = str(raw.get("archive_url") or "")
-            parsed = urlsplit(archive_url)
+            try:
+                parsed = urlsplit(archive_url)
+            except ValueError as exc:
+                raise CharacterCatalogError(
+                    "角色目录包含不安全条目"
+                ) from exc
             if (
                 not package_id
                 or package_id in seen
                 or source not in {"official", "third_party"}
                 or parsed.scheme != "https"
                 or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.fragment
                 or len(sha256) != 64
                 or any(char not in "0123456789abcdef" for char in sha256)
             ):
@@ -307,10 +321,20 @@ class CharacterCatalogService:
             version_key(version)
             minimum = str(raw.get("min_app_version") or "")
             maximum = str(raw.get("max_app_version") or "")
+            minimum_capability = str(
+                raw.get("min_capability_version") or ""
+            )
+            maximum_capability = str(
+                raw.get("max_capability_version") or ""
+            )
             if minimum:
                 version_key(minimum)
             if maximum:
                 version_key(maximum)
+            if minimum_capability:
+                version_key(minimum_capability)
+            if maximum_capability:
+                version_key(maximum_capability)
             seen.add(package_id)
             entries.append(
                 CharacterCatalogEntry(
@@ -322,6 +346,8 @@ class CharacterCatalogService:
                     source=source,
                     min_app_version=minimum,
                     max_app_version=maximum,
+                    min_capability_version=minimum_capability,
+                    max_capability_version=maximum_capability,
                 )
             )
         return entries

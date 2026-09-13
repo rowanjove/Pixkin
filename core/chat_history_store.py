@@ -36,6 +36,12 @@ class ChatHistoryStore:
         connection = sqlite3.connect(str(self.database_path), timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        if str(self.database_path) != ":memory:":
+            try:
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("PRAGMA synchronous = NORMAL")
+            except sqlite3.DatabaseError:
+                pass
         return connection
 
     @contextmanager

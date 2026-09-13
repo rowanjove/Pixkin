@@ -148,6 +148,46 @@ class CharacterEcosystemTests(unittest.TestCase):
             with self.assertRaises(CharacterCatalogError):
                 CharacterCatalogService(path)
 
+    def test_catalog_rejects_credentialed_or_fragment_urls(self):
+        for archive_url in (
+            "https://user:secret@example.test/a.zip",
+            "https://example.test/a.zip#fragment",
+        ):
+            with self.subTest(archive_url=archive_url):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "catalog.json"
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "entries": [
+                                    {
+                                        "id": "unsafe",
+                                        "name": "Unsafe",
+                                        "version": "1.0.0",
+                                        "archive_url": archive_url,
+                                        "sha256": "a" * 64,
+                                        "source": "third_party",
+                                    }
+                                ],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(CharacterCatalogError):
+                        CharacterCatalogService(path)
+
+    def test_catalog_rejects_non_object_and_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(CharacterCatalogError, "根节点"):
+                CharacterCatalogService(path)
+
+            path.write_bytes(b"\xff")
+            with self.assertRaises(CharacterCatalogError):
+                CharacterCatalogService(path)
+
     def test_behavior_editor_keeps_overrides_partitioned_and_previews(self):
         package_a = SimpleNamespace(
             package_id="a",

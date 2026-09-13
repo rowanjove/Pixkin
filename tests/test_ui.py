@@ -27,6 +27,7 @@ from core.pet_animator import PetState
 from core.pet_generation_run import PetGenerationRunStore
 from core.secrets import SecretStore
 from core.services.chat_service import ChatSessionService
+from core.runtime.permissions import ContextPermissionService, PermissionResource, PermissionState
 from core.tool_registry import ToolRegistry
 from ui.chat_window import BubbleShell, ChatBubbleWindow
 from ui.history_window import HistoryWindow
@@ -34,6 +35,7 @@ from ui.onboarding_window import FirstRunWindow
 from ui.pet_lab_window import PetLabWindow
 from ui.pet_window import PetWindow
 from ui.settings_window import SettingsWindow
+from core.speech import SpeechState
 from main import BUILTIN_CHARACTER_ARCHIVES, DesktopPetApp
 
 
@@ -1181,6 +1183,11 @@ class UiSmokeTests(unittest.TestCase):
                 "山山",
             )
             controller.ai_worker = None
+            controller.context_permission_service = ContextPermissionService()
+            controller.context_permission_service.set_state(
+                PermissionResource.NETWORK,
+                PermissionState.ALLOW_SESSION,
+            )
             controller.pet_window = SimpleNamespace(
                 animator=MagicMock(),
                 chat_window=MagicMock(),
@@ -1253,6 +1260,28 @@ class UiSmokeTests(unittest.TestCase):
         controller.live_monitor.isRunning.return_value = False
         controller.ai_worker.isRunning.return_value = False
         controller._maybe_finish_quit()
+        controller._instance_lock.unlock.assert_called_once_with()
+        controller.app.quit.assert_called_once_with()
+
+    def test_finish_tts_worker_triggers_maybe_finish_quit(self):
+        controller = DesktopPetApp.__new__(DesktopPetApp)
+        controller._quitting = True
+        controller._quit_finalized = False
+        controller.app = SimpleNamespace(quit=MagicMock())
+        controller._instance_lock = SimpleNamespace(unlock=MagicMock())
+        controller.live_monitor = None
+        controller.ai_worker = None
+        fake_tts_worker = MagicMock()
+        controller._tts_playback_worker = fake_tts_worker
+        controller._speech_controller = SimpleNamespace(
+            state=SpeechState.TALKING,
+            finish=MagicMock(),
+        )
+
+        controller._finish_tts_worker(fake_tts_worker)
+
+        self.assertIsNone(controller._tts_playback_worker)
+        controller._speech_controller.finish.assert_called_once_with()
         controller._instance_lock.unlock.assert_called_once_with()
         controller.app.quit.assert_called_once_with()
 
@@ -1556,7 +1585,17 @@ class UiSmokeTests(unittest.TestCase):
             accept.assert_called_once()
             settings.close()
 
-            lab = PetLabWindow(config, manager)
+            permissions = ContextPermissionService()
+            permissions.set_state(
+                PermissionResource.NETWORK,
+                PermissionState.ALLOW_SESSION,
+                session_only=True,
+            )
+            lab = PetLabWindow(
+                config,
+                manager,
+                context_permission_service=permissions,
+            )
             lab.reference_paths = [base / "reference.png"]
             lab.name_input.setText("安全伙伴")
             lab.api_key.setText("existing-image-key")

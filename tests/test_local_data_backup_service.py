@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 import zipfile
@@ -29,10 +30,29 @@ class LocalDataBackupTests(unittest.TestCase):
         )
         (root / "profile").mkdir()
         (root / "profile" / "avatar.png").write_bytes(b"avatar")
+        (root / "plugins").mkdir()
+        (root / "plugins" / "plugin.sqlite3").write_bytes(b"plugin-db")
+        (root / "audit").mkdir()
+        (root / "audit" / "tool-audit.json").write_text(
+            '{"schema_version":1,"events":[]}',
+            encoding="utf-8",
+        )
+        (root / "crashes").mkdir()
+        (root / "crashes" / "crash.json").write_text(
+            '{"schema_version":1}',
+            encoding="utf-8",
+        )
         (root / "memories.json").write_text(
             '{"schema_version":1,"enabled":true,"records":[]}',
             encoding="utf-8",
         )
+        connection = sqlite3.connect(root / "memory.sqlite3")
+        try:
+            connection.execute("CREATE TABLE marker(value TEXT)")
+            connection.execute("INSERT INTO marker VALUES ('memory-v2')")
+            connection.commit()
+        finally:
+            connection.close()
         chat = ChatHistoryStore(root / "chat-history.sqlite3")
         session = chat.create_session("role", "角色")
         chat.add_message(session, "user", "backup-chat")
@@ -51,6 +71,7 @@ class LocalDataBackupTests(unittest.TestCase):
             self.assertIn("config.json", manifest["files"])
             self.assertIn("chat-history.sqlite3", manifest["files"])
             self.assertIn("memories.json", manifest["files"])
+            self.assertIn("memory.sqlite3", manifest["files"])
             self.assertIn(
                 "characters/role/character.md",
                 manifest["files"],
@@ -59,6 +80,9 @@ class LocalDataBackupTests(unittest.TestCase):
                 "pet-lab/runs/run-1/run.json",
                 manifest["files"],
             )
+            self.assertIn("plugins/plugin.sqlite3", manifest["files"])
+            self.assertIn("audit/tool-audit.json", manifest["files"])
+            self.assertIn("crashes/crash.json", manifest["files"])
 
     def test_restore_is_staged_then_applied_with_previous_data_backup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -117,6 +141,14 @@ class LocalDataBackupTests(unittest.TestCase):
                     / "character.md"
                 ).is_file()
             )
+            connection = sqlite3.connect(root / "memory.sqlite3")
+            try:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM marker").fetchone()[0],
+                    "memory-v2",
+                )
+            finally:
+                connection.close()
 
     def test_tampered_archive_is_rejected_before_staging(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -155,5 +187,62 @@ class LocalDataBackupTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            with self.assertRaises(LocalDataBackupError):
+                service.apply_pending_restore()
+
+    def test_manifest_non_object_is_rejected_as_domain_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = LocalDataBackupService(root)
+            archive = root / "malformed.zip"
+            with zipfile.ZipFile(archive, "w") as target:
+                target.writestr("manifest.json", b"[]")
+            with self.assertRaisesRegex(
+                LocalDataBackupError,
+                "根节点",
+            ):
+                service.inspect(archive)
+
+    def test_malformed_marker_root_is_rejected_cleanly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = LocalDataBackupService(root)
+            service.marker_path.write_text("[]", encoding="utf-8")
+            with self.assertRaises(LocalDataBackupError):
+                service.apply_pending_restore()
+
+    def test_marker_restore_id_and_schema_are_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = LocalDataBackupService(root)
+            stage = service.staging_root / ("a" * 32)
+            (stage / "data").mkdir(parents=True)
+            (stage / "manifest.json").write_text(
+                json.dumps({"schema_version": 1, "files": {}}),
+                encoding="utf-8",
+            )
+            service.marker_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "restore_id": "../escape",
+                        "stage": str(stage),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(LocalDataBackupError):
+                service.apply_pending_restore()
+
+            service.marker_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 999,
+                        "restore_id": "a" * 32,
+                        "stage": str(stage),
+                    }
+                ),
+                encoding="utf-8",
+            )
             with self.assertRaises(LocalDataBackupError):
                 service.apply_pending_restore()

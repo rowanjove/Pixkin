@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 from core.services.update_service import UpdateManifestVerifier
+from core.version import VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,8 +56,13 @@ def test_public_key_is_bundled_but_private_key_is_not_in_workspace():
                 {
                     ".git",
                     "__pycache__",
-                    "build",
-                    "dist",
+                        "build",
+                        "build_debug",
+                        "build_fix",
+                        "build_fix_portable",
+                        "dist",
+                        "dist_debug",
+                        "dist_fix",
                     "release",
                     "artifacts",
                 }
@@ -81,7 +87,7 @@ def test_release_signing_tool_round_trip():
         return
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        installer = root / "Pixkin-Setup-1.3.0.exe"
+        installer = root / f"Pixkin-Setup-{VERSION}.exe"
         installer.write_bytes(b"installer")
         manifest = root / "update-stable.json"
         result = subprocess.run(
@@ -99,9 +105,9 @@ def test_release_signing_tool_round_trip():
                 "--channel",
                 "stable",
                 "--base-url",
-                "https://updates.example/releases/v1.3.0/",
+                f"https://updates.example/releases/v{VERSION}/",
                 "--release-notes-url",
-                "https://updates.example/releases/v1.3.0",
+                f"https://updates.example/releases/v{VERSION}",
                 "--minimum-compatible-version",
                 "1.2.0",
             ],
@@ -118,4 +124,4 @@ def test_release_signing_tool_round_trip():
             expected_channel="stable",
             current_version="1.2.0",
         )
-        assert release.version == "1.3.0"
+        assert release.version == VERSION

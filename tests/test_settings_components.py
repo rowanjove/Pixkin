@@ -13,6 +13,8 @@ from ui.settings_profile_components import UserProfileEditor
 from core.services.memory_service import MemoryService
 from ui.extension_settings_components import ExtensionSettingsPanel
 from ui.memory_settings_components import MemorySettingsPanel
+from ui.proactive_settings_components import ProactiveSettingsPanel
+from ui.voice_output_components import VoiceOutputSettingsPanel
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -156,6 +158,46 @@ class SettingsComponentTests(unittest.TestCase):
             panel._refresh_gameplay()
 
             self.assertFalse(panel.values()["gameplay"][0]["enabled"])
+            panel.deleteLater()
+
+    def test_voice_output_settings_panel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            from core.config import ConfigManager
+            config_path = Path(directory) / "config.json"
+            cfg = ConfigManager(str(config_path))
+            panel = VoiceOutputSettingsPanel(cfg)
+
+            self.assertFalse(panel.values().enabled)
+            panel.enabled_input.setChecked(True)
+            panel.speed_spin.setValue(1.5)
+            vals = panel.values()
+            self.assertTrue(vals.enabled)
+            self.assertEqual(vals.speed, 1.5)
+
+            panel.save()
+            self.assertTrue(cfg.get("voice_output", "enabled"))
+            self.assertEqual(cfg.get("voice_output", "speed"), 1.5)
+            panel.deleteLater()
+
+    def test_proactive_settings_panel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            from core.config import ConfigManager
+            config_path = Path(directory) / "config.json"
+            cfg = ConfigManager(str(config_path))
+            panel = ProactiveSettingsPanel(cfg)
+
+            # Desktop context observation is opt-in until per-sensor
+            # permissions are wired into the settings surface.
+            self.assertFalse(panel.values().enabled)
+            self.assertTrue(panel.values().quiet_fullscreen)
+            self.assertEqual(panel.values().work_stretch_interval_minutes, 90)
+
+            panel.interval_spin.setValue(60)
+            panel.sleep_guard_input.setChecked(False)
+            panel.save()
+
+            self.assertEqual(cfg.get("proactive", "work_stretch_interval_minutes"), 60)
+            self.assertFalse(cfg.get("proactive", "sleep_guard"))
             panel.deleteLater()
 
 
