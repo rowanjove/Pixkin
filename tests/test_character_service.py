@@ -1,4 +1,3 @@
-import shutil
 import tempfile
 import unittest
 import zipfile
@@ -15,6 +14,21 @@ from core.version import CAPABILITY_MILESTONE
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _custom_archive(base: Path) -> Path:
+    """Create a non-built-in archive from a verified package fixture."""
+    source = ROOT / "character-packs" / "shanshan.zip"
+    archive_path = base / "custom.zip"
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(
+        archive_path, "w"
+    ) as target_zip:
+        for info in source_zip.infolist():
+            data = source_zip.read(info.filename)
+            if info.filename == "character.md":
+                data = data.replace(b"id: shanshan", b"id: custom")
+            target_zip.writestr(info, data)
+    return archive_path
 
 
 class CharacterServiceTests(unittest.TestCase):
@@ -60,8 +74,9 @@ class CharacterServiceTests(unittest.TestCase):
 
     def test_existing_custom_character_requires_explicit_confirmation(self):
         with tempfile.TemporaryDirectory() as directory:
-            service = self._service(Path(directory))
-            archive = ROOT / "character-packs" / "yeye.zip"
+            base = Path(directory)
+            service = self._service(base)
+            archive = _custom_archive(base)
             service.install_archive(archive, activate=False)
             plan = service.prepare_install(archive)
 
@@ -85,11 +100,7 @@ class CharacterServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             service = self._service(base)
-            archive = base / "yeye.zip"
-            shutil.copy2(
-                ROOT / "character-packs" / "yeye.zip",
-                archive,
-            )
+            archive = _custom_archive(base)
             plan = service.prepare_install(archive)
             with zipfile.ZipFile(archive, "a") as package:
                 package.comment = b"changed-after-confirmation"
@@ -103,21 +114,21 @@ class CharacterServiceTests(unittest.TestCase):
 
     def test_deleting_active_custom_character_switches_to_default(self):
         with tempfile.TemporaryDirectory() as directory:
-            service = self._service(Path(directory))
+            base = Path(directory)
+            service = self._service(base)
             service.install_archive(
                 ROOT / "character-packs" / "shanshan.zip",
                 activate=False,
             )
-            service.install_archive(
-                ROOT / "character-packs" / "yeye.zip",
-            )
+            archive = _custom_archive(base)
+            service.install_archive(archive)
 
-            result = service.delete("yeye")
+            result = service.delete("custom")
 
-            self.assertEqual(result.deleted_package_id, "yeye")
+            self.assertEqual(result.deleted_package_id, "custom")
             self.assertTrue(result.switched_to_fallback)
             self.assertEqual(result.active_package.package_id, "shanshan")
-            self.assertFalse((service.root / "yeye").exists())
+            self.assertFalse((service.root / "custom").exists())
 
     def test_capability_compatibility_is_checked_during_prepare(self):
         with tempfile.TemporaryDirectory() as directory:

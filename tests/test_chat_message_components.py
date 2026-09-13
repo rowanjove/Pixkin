@@ -80,7 +80,7 @@ class ChatMessageComponentTests(unittest.TestCase):
         )
 
         prompts = []
-        welcome = WelcomeMessageCard("椰子", None, prompts.append)
+        welcome = WelcomeMessageCard("Pip", None, prompts.append)
         buttons = welcome.findChildren(QPushButton, "suggestion")
         buttons[0].click()
         self.assertEqual(prompts, ["介绍一下你能调用的工具"])

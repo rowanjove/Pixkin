@@ -54,7 +54,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 ```
 
 - [x] 构建脚本成功退出，`release/` 只包含本版本计划发布的文件。
-- [x] `Pixkin-<version>-win64.zip`、`Pixkin-Portable-<version>.exe`、`椰子.zip`、
+- [x] `Pixkin-<version>-win64.zip`、`Pixkin-Portable-<version>.exe`、
+  `shanshan.zip`、`linlin.zip`、`pip.zip`、
   `CHARACTER_PACKAGE_SPEC.md`、`SBOM.cdx.json` 和 `SHA256SUMS.txt` 均存在。
 - [x] 在重新生成 `SHA256SUMS.txt` 后没有再修改任何发布文件。
 - [x] 手工复算至少文件夹版 ZIP、便携版 EXE 和角色包的 SHA-256，结果一致。
@@ -80,7 +81,6 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 - [ ] 按住说话、松开停止、麦克风静音、无设备提示和独立转写在真实硬件上正常。
 - [ ] 四类全局快捷键可注册、冲突会提示，退出后可被其他程序重新注册。
 - [ ] 免打扰跨午夜、静默结束补提醒、重复提醒间隔和房间分组行为正常。
-- [ ] 可导入随发行附带的 `椰子.zip`，预览、动画和卸载流程正常。
 - [ ] 使用模拟或受控低成本接口走通一次基础孵化：预检、身份审核、QA、最终安装均正常。
 - [ ] 中断任务后可恢复；失败动作可单独重试；预算耗尽前会安全停止。
 

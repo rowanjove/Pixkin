@@ -18,7 +18,7 @@ class OfficialCharacterTrustTests(unittest.TestCase):
             ROOT / "character-packs" / "official-sha256.json"
         )
 
-        for name in ("shanshan.zip", "linlin.zip", "pip.zip", "yeye.zip"):
+        for name in ("shanshan.zip", "linlin.zip", "pip.zip"):
             with self.subTest(name=name):
                 self.assertTrue(
                     trust.verify(name, ROOT / "character-packs" / name)

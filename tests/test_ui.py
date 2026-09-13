@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PyQt6.QtCore import QCoreApplication, Qt, QPointF, QEvent, QObject, QRect
-from PyQt6.QtGui import QMouseEvent, QRegion
+from PyQt6.QtCore import QCoreApplication, Qt, QPointF, QEvent, QObject
+from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QLabel, QListWidget, QMenu, QMessageBox,
@@ -93,7 +93,6 @@ class UiSmokeTests(unittest.TestCase):
             BUILTIN_CHARACTER_ARCHIVES,
             ("shanshan.zip", "linlin.zip", "pip.zip"),
         )
-        self.assertNotIn("yeye.zip", BUILTIN_CHARACTER_ARCHIVES)
 
     def test_builtin_bootstrap_repairs_corrupt_installed_directory(self):
         root = Path(__file__).resolve().parents[1]
@@ -121,171 +120,6 @@ class UiSmokeTests(unittest.TestCase):
             self.assertTrue(
                 manager.package_matches_zip("shanshan", str(archive))
             )
-
-    def test_existing_official_yeye_is_upgraded_without_forced_install(self):
-        root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            config = ConfigManager(str(base / "config.json"))
-            manager = CharacterPackageManager(config, base / "characters")
-            shutil.copytree(
-                root / "character-packs" / "yeye",
-                manager.root / "yeye",
-            )
-            manager.activate("yeye")
-            controller = DesktopPetApp.__new__(DesktopPetApp)
-            controller.config_mgr = config
-            controller.package_manager = manager
-
-            with patch(
-                "main.resource_path",
-                side_effect=lambda relative: root / relative,
-            ):
-                controller._update_installed_official_characters()
-
-            upgraded = manager.get_active()
-            self.assertEqual(upgraded.package_id, "yeye")
-            self.assertEqual(upgraded.schema_version, "2.0")
-            self.assertIn("walk_left", upgraded.animations)
-            self.assertGreater(len(upgraded.animations["walk_left"].frames), 1)
-
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            config = ConfigManager(str(base / "config.json"))
-            manager = CharacterPackageManager(config, base / "characters")
-            controller = DesktopPetApp.__new__(DesktopPetApp)
-            controller.config_mgr = config
-            controller.package_manager = manager
-            with patch(
-                "main.resource_path",
-                side_effect=lambda relative: root / relative,
-            ):
-                controller._update_installed_official_characters()
-            self.assertFalse((manager.root / "yeye").exists())
-
-    def test_yeye_uses_dedicated_art_for_all_directional_edge_states(self):
-        root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            config = ConfigManager(str(base / "config.json"))
-            manager = CharacterPackageManager(config, base / "characters")
-            package = manager.import_zip(
-                str(root / "character-packs" / "yeye.zip")
-            )
-            pet = PetWindow(config, package)
-
-            expected = {
-                f"edge_{phase}_{side}"
-                for side in ("left", "right", "top", "bottom")
-                for phase in ("enter", "idle", "hover", "exit")
-            }
-            self.assertEqual(pet._dedicated_edge_states, expected)
-            for side in ("left", "right", "top", "bottom"):
-                pet.dock_side = side
-                pet.is_docked = True
-                pet.animator.set_state(
-                    pet._edge_state_for(side, "idle")
-                )
-                pet.show()
-                self.app.processEvents()
-                rendered = pet.grab()
-                self.assertFalse(rendered.isNull())
-
-                reveal = pet._edge_reveal(side)
-                design_reveal = pet._dedicated_edge_design_reveal(side)
-                self.assertLess(
-                    design_reveal,
-                    pet.EDGE_ART_SIZE,
-                )
-                self.assertEqual(
-                    reveal,
-                    max(
-                        pet.peek_size,
-                        round(
-                            design_reveal
-                            * pet.width()
-                            / pet.DESIGN_SIZE
-                        ),
-                    ),
-                )
-                scale_x = rendered.width() / pet.width()
-                scale_y = rendered.height() / pet.height()
-                reveal_x = round(reveal * scale_x)
-                reveal_y = round(reveal * scale_y)
-                if side == "left":
-                    visible = QRect(
-                        rendered.width() - reveal_x,
-                        0,
-                        reveal_x,
-                        rendered.height(),
-                    )
-                elif side == "right":
-                    visible = QRect(
-                        0, 0, reveal_x, rendered.height()
-                    )
-                elif side == "top":
-                    visible = QRect(
-                        0,
-                        rendered.height() - reveal_y,
-                        rendered.width(),
-                        reveal_y,
-                    )
-                else:
-                    visible = QRect(
-                        0, 0, rendered.width(), reveal_y
-                    )
-                subject = QRegion(rendered.mask()).boundingRect()
-                self.assertFalse(subject.isEmpty())
-                self.assertTrue(
-                    visible.contains(subject),
-                    f"{side} edge art would be cropped: "
-                    f"subject={subject}, visible={visible}",
-                )
-                if side == "left":
-                    self.assertEqual(subject.left(), visible.left())
-                elif side == "right":
-                    self.assertEqual(subject.right(), visible.right())
-                elif side == "top":
-                    self.assertEqual(subject.top(), visible.top())
-                else:
-                    self.assertEqual(subject.bottom(), visible.bottom())
-
-            pet.dock_side = "left"
-            pet.is_docked = True
-            target = pet._dock_target("left")
-            pet.move(*target)
-            with patch.object(pet, "_animate_move") as animate:
-                pet._show_edge_hover()
-                self.assertEqual(
-                    pet.animator.current_state,
-                    PetState.EDGE_HOVER_LEFT,
-                )
-                animate.assert_not_called()
-                pet._show_edge_idle()
-                animate.assert_not_called()
-
-            pet.dock_side = "right"
-            pet.is_docked = False
-            pet.animator.set_state(PetState.EDGE_EXIT_RIGHT)
-            pet.tick = pet._state_started_tick
-            self.assertTrue(pet._should_draw_edge_art())
-            exit_render = pet.grab()
-            exit_subject = QRegion(exit_render.mask()).boundingRect()
-            exit_frame = pet._current_package_frame("edge_exit_right")
-            _scaled, expected_subject = pet._scaled_edge_art(exit_frame)
-            exit_scale_x = exit_render.width() / pet.width()
-            exit_scale_y = exit_render.height() / pet.height()
-            self.assertEqual(
-                exit_subject.width(),
-                round(expected_subject.width() * exit_scale_x),
-            )
-            self.assertEqual(
-                exit_subject.height(),
-                round(expected_subject.height() * exit_scale_y),
-            )
-
-            pet.close()
-            pet.chat_window.close()
 
     @classmethod
     def tearDownClass(cls):
@@ -480,17 +314,17 @@ class UiSmokeTests(unittest.TestCase):
 
     def test_chat_character_updates_placeholder(self):
         chat = ChatBubbleWindow()
-        chat.set_character("椰子")
-        self.assertIn("椰子", chat.input_field.placeholderText())
+        chat.set_character("Pip")
+        self.assertIn("Pip", chat.input_field.placeholderText())
         self.assertNotIn("山山", chat.input_field.placeholderText())
-        self.assertEqual(chat.brand_label.text(), "椰子")
+        self.assertEqual(chat.brand_label.text(), "Pip")
         self.assertEqual(chat.status_label.text(), "待命")
-        self.assertNotIn("椰子", chat.status_label.text())
+        self.assertNotIn("Pip", chat.status_label.text())
 
         chat.append_message("assistant", "你好")
         self.assertEqual(
             chat._message_rows[-1].author_label.text(),
-            "椰子",
+            "Pip",
         )
         chat.set_busy(True)
         self.assertEqual(chat.status_label.text(), "思考中…")
@@ -757,7 +591,7 @@ class UiSmokeTests(unittest.TestCase):
 
     def test_streaming_updates_one_row_and_keeps_scroll_at_bottom(self):
         chat = ChatBubbleWindow()
-        chat.set_character("椰子")
+        chat.set_character("Pip")
         chat.append_message(
             "assistant",
             "\n".join(f"历史消息 {index}" for index in range(40)),
@@ -938,7 +772,7 @@ class UiSmokeTests(unittest.TestCase):
                 activate=False,
             )
             manager.import_zip(
-                str(root / "character-packs" / "yeye.zip"),
+                str(root / "character-packs" / "pip.zip"),
                 activate=False,
             )
             settings = SettingsWindow(config, manager)
@@ -964,16 +798,16 @@ class UiSmokeTests(unittest.TestCase):
             settings.character_list.setCurrentRow(linlin_row)
             self.app.processEvents()
             self.assertFalse(settings.delete_character_btn.isEnabled())
-            yeye_row = next(
+            pip_row = next(
                 row
                 for row in range(settings.character_list.count())
                 if settings.character_list.item(row).data(
                     Qt.ItemDataRole.UserRole
-                ) == "yeye"
+                ) == "pip"
             )
-            settings.character_list.setCurrentRow(yeye_row)
+            settings.character_list.setCurrentRow(pip_row)
             self.app.processEvents()
-            self.assertTrue(settings.delete_character_btn.isEnabled())
+            self.assertFalse(settings.delete_character_btn.isEnabled())
             self.assertEqual(settings.character_list.width(), fixed_width)
             self.assertTrue(all(
                 settings.character_list.item(row).sizeHint().height() == 54

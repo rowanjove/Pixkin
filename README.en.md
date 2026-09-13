@@ -76,7 +76,7 @@ Character ZIPs require `character.md` with YAML Front Matter metadata, personali
 
 v2 characters use a `192 × 208` canvas and support separate frames, action strips, and atlases. Basic, standard, and full tiers validate their required states. Older 9-action workshop tasks remain resumable but are not automatically promoted to standard tier. The initial official characters use 8×9 transparent atlases.
 
-Shanshan, Linlin, and Pip are bundled; Yeye is a separate ZIP. Built-in characters cannot be deleted. Deleting the active custom character returns to Shanshan. Themes can follow Windows or use light/dark mode.
+Shanshan, Linlin, and Pip are bundled. Built-in characters cannot be deleted. Deleting the active custom character returns to Shanshan. Themes can follow Windows or use light/dark mode.
 
 Imports check path traversal, symlinks, file counts, and extracted size. Built-in SHA-256 manifests verify official packages. Third-party packages show author, license, and fingerprint information without automatically trusting the author's claims.
 
