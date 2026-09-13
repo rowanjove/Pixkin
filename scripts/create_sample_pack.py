@@ -1,4 +1,4 @@
-"""从统一的 v2 资产打包内置角色和可手动导入角色。"""
+"""从统一的 v2 资产打包内置角色。"""
 
 import hashlib
 import json
@@ -13,7 +13,6 @@ from core.character_package import (
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SOURCE_ROOT = ROOT / "character-packs" / "v2-built"
 BUILTIN_PACKAGES = ("shanshan", "linlin", "pip")
-IMPORT_ONLY_PACKAGES = ("yeye",)
 OFFICIAL_HASH_MANIFEST = ROOT / "character-packs" / "official-sha256.json"
 CATALOG_FILE = ROOT / "character-packs" / "catalog.json"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
@@ -119,7 +118,7 @@ def update_official_metadata(outputs: dict[str, Path]) -> None:
 
 def main():
     outputs = {}
-    for package_id in (*BUILTIN_PACKAGES, *IMPORT_ONLY_PACKAGES):
+    for package_id in BUILTIN_PACKAGES:
         outputs[package_id] = build_package(package_id)
         print(outputs[package_id])
     update_official_metadata(outputs)

@@ -55,7 +55,7 @@ class ChatExportServiceTests(unittest.TestCase):
         {
             "role": "assistant",
             "content": "你好",
-            "character_name": "椰子",
+            "character_name": "Pip",
             "created_at": "2026-07-25T09:10:11+08:00",
         }
     ]
@@ -76,7 +76,7 @@ class ChatExportServiceTests(unittest.TestCase):
             )
 
             self.assertIn(
-                "## 2026-07-25 09:10:11 · 椰子",
+                "## 2026-07-25 09:10:11 · Pip",
                 markdown.read_text(encoding="utf-8"),
             )
             self.assertEqual(

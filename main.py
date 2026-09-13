@@ -153,8 +153,6 @@ class TtsPlaybackWorker(QThread):
 
 LOGGER = logging.getLogger("desktop_pet.main")
 BUILTIN_CHARACTER_ARCHIVES = ("shanshan.zip", "linlin.zip", "pip.zip")
-OPTIONAL_OFFICIAL_CHARACTER_ARCHIVES = ("yeye.zip",)
-OFFICIAL_CHARACTER_AUTHORS = {"Pixkin", "Pixkin 伙伴工坊"}
 LEGACY_DEFAULT_PACKAGE_IDS = {"", "default-assistant", "pixkin-pip"}
 
 
@@ -308,7 +306,6 @@ class DesktopPetApp:
         self.package_manager = CharacterPackageManager(self.config_mgr)
         self.character_service = CharacterService(self.package_manager)
         self._ensure_builtin_characters()
-        self._update_installed_official_characters()
         self._upgrade_legacy_character()
         active_package = self.character_service.get_active()
         if active_package is None:
@@ -859,56 +856,6 @@ class DesktopPetApp:
                 LOGGER.info("已%s内置角色 %s", action, result.package.package_id)
             except Exception as exc:
                 LOGGER.warning("安装内置角色失败 %s: %s", archive_name, exc)
-
-    def _update_installed_official_characters(self):
-        """只升级用户已安装的官方可选角色，不在新用户目录中强制安装。"""
-        characters = self._characters()
-        installed = {
-            package.package_id: package
-            for package in characters.list_packages()
-        }
-        active_id = self.config_mgr.get("character", "active_pack", "")
-        for archive_name in OPTIONAL_OFFICIAL_CHARACTER_ARCHIVES:
-            archive = resource_path(f"character-packs/{archive_name}")
-            if not archive.is_file():
-                LOGGER.warning("缺少官方可选角色包：%s", archive)
-                continue
-            if not self._is_trusted_official_archive(
-                archive_name,
-                archive,
-            ):
-                LOGGER.error(
-                    "官方角色包哈希不匹配，已拒绝更新：%s",
-                    archive_name,
-                )
-                continue
-            try:
-                plan = characters.prepare_install(archive)
-                current = installed.get(plan.package.package_id)
-                if current is None:
-                    continue
-                if current.author not in OFFICIAL_CHARACTER_AUTHORS:
-                    LOGGER.info(
-                        "保留同 ID 的非官方角色 %s，未自动覆盖",
-                        current.package_id,
-                    )
-                    continue
-                if characters.package_matches_archive(
-                    plan.package.package_id, archive
-                ):
-                    continue
-                result = characters.install(
-                    plan,
-                    replace_confirmed=True,
-                    activate=active_id == plan.package.package_id,
-                )
-                updated = result.package
-                installed[updated.package_id] = updated
-                LOGGER.info("已升级官方可选角色 %s", updated.package_id)
-            except Exception as exc:
-                LOGGER.warning(
-                    "升级官方可选角色失败 %s: %s", archive_name, exc
-                )
 
     def _is_trusted_official_archive(
         self,

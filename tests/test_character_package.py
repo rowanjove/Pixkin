@@ -323,24 +323,6 @@ class CharacterPackageTests(unittest.TestCase):
             ):
                 manager.delete_package("pip")
 
-    def test_yeye_is_a_deletable_imported_package(self):
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            config = ConfigManager(str(base / "config.json"))
-            manager = CharacterPackageManager(config, base / "characters")
-            manager.import_zip(
-                str(ROOT / "character-packs" / "shanshan.zip"),
-                activate=False,
-            )
-            manager.import_zip(
-                str(ROOT / "character-packs" / "yeye.zip"),
-                activate=False,
-            )
-
-            manager.delete_package("yeye")
-
-            self.assertFalse((base / "characters" / "yeye").exists())
-
     def test_v2_frames_package_loads_structured_persona_and_behavior(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

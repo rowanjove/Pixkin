@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import shutil
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -74,27 +73,6 @@ PROFILES = {
         },
         "cooldowns": {"wave": 32, "stretch": 45, "sleep": 110},
         "run_dir": PACKS / "v2-runs" / "pip",
-    },
-    "yeye": {
-        "name": "椰子",
-        "description": "奶油金与深棕配色、安静温柔的双卷角卡通桌面伙伴。",
-        "identity": "你是椰子，一位慢热、柔和、安静细心的 Pixkin 桌面伙伴，会耐心陪伴用户并提供稳妥帮助。",
-        "traits": ["温柔", "安静", "细心", "慢热"],
-        "relationship": "低打扰、让人安心的陪伴型搭档。",
-        "tone": "柔和自然",
-        "pacing": "舒缓",
-        "reply_length": "简洁，不主动延伸话题",
-        "motion_temperament": "gentle",
-        "speed": 0.85,
-        "interval": [7, 13],
-        "weights": {
-            "blink": 1.5, "look_around": 1.2,
-            "stretch": 0.8, "wave": 0.9, "sleep": 0.35,
-            "walk_left": 1.0, "walk_right": 1.0,
-            "jump": 0.55, "happy": 0.45,
-        },
-        "cooldowns": {"wave": 70, "stretch": 85, "sleep": 70},
-        "run_dir": PACKS / "yeye-hatch",
     },
 }
 
@@ -189,55 +167,6 @@ DEFAULT_EDGE_ANIMATIONS = """\
 """
 
 
-def yeye_edge_animation(side: str, *, art_side: str | None = None) -> str:
-    files = [
-        f"images/edge/{art_side or side}-{index:02d}.png"
-        for index in range(6)
-    ]
-
-    def source(indices) -> str:
-        selected = ", ".join(json.dumps(files[index]) for index in indices)
-        return (
-            "{type: frames, files: ["
-            + selected
-            + "], cell_size: [192, 208]}"
-        )
-
-    return f"""\
-  edge_enter_{side}:
-    source: {source((0, 1, 2, 3))}
-    fps: 10
-    playback: once
-    anchor: [96, 104]
-  edge_idle_{side}:
-    source: {source((3, 4, 5, 4))}
-    fps: 5
-    playback: loop
-    anchor: [96, 104]
-  edge_hover_{side}:
-    source: {source((3, 4, 5, 4))}
-    fps: 7
-    playback: once
-    anchor: [96, 104]
-  edge_exit_{side}:
-    source: {source((3, 2, 1, 0))}
-    fps: 10
-    playback: once
-    anchor: [96, 104]
-"""
-
-
-YEYE_EDGE_ANIMATIONS = "".join(
-    yeye_edge_animation(
-        side,
-        art_side=(
-            {"left": "right", "right": "left"}.get(side, side)
-        ),
-    )
-    for side in ("left", "right", "top", "bottom")
-)
-
-
 def yaml_value(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -249,11 +178,7 @@ def render_manifest(package_id: str, profile: dict) -> str:
     cooldowns = "\n".join(
         f"    {key}: {value}" for key, value in profile["cooldowns"].items()
     )
-    edge_animations = (
-        YEYE_EDGE_ANIMATIONS
-        if package_id == "yeye"
-        else DEFAULT_EDGE_ANIMATIONS
-    )
+    edge_animations = DEFAULT_EDGE_ANIMATIONS
     return f"""\
 ---
 schema_version: "2.0"
@@ -349,22 +274,8 @@ def build_package(package_id: str, profile: dict) -> Path:
 
     preview_source = profile["run_dir"] / "frames" / "idle" / "00.png"
     preview_target = package_dir / "images" / "preview.png"
-    if package_id in {"shanshan", "linlin", "pip"}:
-        clean_green_spill(spritesheet_source, spritesheet)
-        clean_green_spill(preview_source, preview_target)
-    else:
-        shutil.copy2(spritesheet_source, spritesheet)
-        preview_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(preview_source, preview_target)
-    if package_id == "yeye":
-        edge_source = PACKS / "yeye-edge" / "frames"
-        if not edge_source.is_dir():
-            raise SystemExit(f"missing Yeye edge frames: {edge_source}")
-        shutil.copytree(
-            edge_source,
-            package_dir / "images" / "edge",
-            dirs_exist_ok=True,
-        )
+    clean_green_spill(spritesheet_source, spritesheet)
+    clean_green_spill(preview_source, preview_target)
     (package_dir / "character.md").write_text(
         render_manifest(package_id, profile), encoding="utf-8"
     )
@@ -376,10 +287,6 @@ def build_package(package_id: str, profile: dict) -> Path:
             package_dir / "spritesheet.webp",
             package_dir / "images" / "preview.png",
         ]
-        if package_id == "yeye":
-            members.extend(
-                sorted((package_dir / "images" / "edge").glob("*.png"))
-            )
         for path in members:
             # Reproducible, metadata-free official archives: fixed DOS epoch
             # timestamp, stored bytes, and no host-specific mode bits.
@@ -395,8 +302,6 @@ def build_package(package_id: str, profile: dict) -> Path:
 def main() -> None:
     outputs = {package_id: build_package(package_id, profile)
                for package_id, profile in PROFILES.items()}
-    shutil.copy2(outputs["yeye"], PACKS / "椰子.zip")
-    shutil.copy2(outputs["yeye"], ROOT / "椰子.zip")
     for package_id, output in outputs.items():
         print(f"{package_id}: {output}")
 

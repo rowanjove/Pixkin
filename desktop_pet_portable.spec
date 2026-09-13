@@ -15,7 +15,6 @@ a = Analysis(
         (str(root / "character-packs" / "shanshan.zip"), "character-packs"),
         (str(root / "character-packs" / "linlin.zip"), "character-packs"),
         (str(root / "character-packs" / "pip.zip"), "character-packs"),
-        (str(root / "character-packs" / "yeye.zip"), "character-packs"),
         (str(root / "character-packs" / "official-sha256.json"), "character-packs"),
         (str(root / "character-packs" / "catalog.json"), "character-packs"),
         (str(root / "assets" / "pixkin"), "assets/pixkin"),

@@ -5,7 +5,6 @@ import zipfile
 from pathlib import Path
 
 from PIL import Image
-import yaml
 
 from scripts.build_v2_character_packs import clean_green_spill
 
@@ -71,56 +70,6 @@ class ReleaseAssetTests(unittest.TestCase):
             self.assertLessEqual(pixels[1][1], max(pixels[1][0], pixels[1][2]) + 6)
             self.assertEqual(pixels[3], (80, 35, 110, 255))
 
-    def test_yeye_visible_ambient_actions_are_declared(self):
-        with zipfile.ZipFile(
-            ROOT / "character-packs" / "yeye.zip"
-        ) as archive:
-            text = archive.read("character.md").decode("utf-8")
-            names = set(archive.namelist())
-        frontmatter = text.split("---", 2)[1]
-        metadata = yaml.safe_load(frontmatter)
-        behavior = metadata["behavior"]
-        animations = metadata["animations"]
-        self.assertEqual(behavior["idle_interval_seconds"], [7, 13])
-        self.assertGreater(behavior["ambient_weights"]["walk_left"], 0)
-        self.assertGreater(behavior["ambient_weights"]["walk_right"], 0)
-        self.assertEqual(
-            animations["look_around"]["source"]["row"], 6
-        )
-        for side in ("left", "right", "top", "bottom"):
-            for phase in ("enter", "idle", "hover", "exit"):
-                source = animations[f"edge_{phase}_{side}"]["source"]
-                self.assertEqual(source["type"], "frames")
-                self.assertGreaterEqual(len(source["files"]), 4)
-                for file in source["files"]:
-                    self.assertIn(file, names)
-
-    def test_yeye_horizontal_edge_art_faces_inward_and_joins_idle(self):
-        with zipfile.ZipFile(
-            ROOT / "character-packs" / "yeye.zip"
-        ) as archive:
-            text = archive.read("character.md").decode("utf-8")
-        metadata = yaml.safe_load(text.split("---", 2)[1])
-        animations = metadata["animations"]
-
-        # The file names describe the art's occupied half. Screen-edge states
-        # therefore use the opposite file set so the character faces inward.
-        for side in ("left", "right"):
-            art_side = "right" if side == "left" else "left"
-            prefix = f"images/edge/{art_side}-"
-            enter = animations[f"edge_enter_{side}"]["source"]["files"]
-            hover = animations[f"edge_hover_{side}"]
-            exit_ = animations[f"edge_exit_{side}"]["source"]["files"]
-            self.assertEqual(hover["playback"], "once")
-            self.assertEqual(
-                enter,
-                [f"{prefix}{index:02d}.png" for index in range(4)],
-            )
-            self.assertEqual(
-                exit_,
-                [f"{prefix}{index:02d}.png" for index in range(3, -1, -1)],
-            )
-
     def test_windows_powershell_build_script_has_utf8_bom(self):
         content = (ROOT / "scripts" / "build_release.ps1").read_bytes()
         self.assertTrue(content.startswith(b"\xef\xbb\xbf"))
@@ -134,11 +83,10 @@ class ReleaseAssetTests(unittest.TestCase):
         self.assertIn("-m pip_audit", text)
         self.assertIn("SBOM.cdx.json", text)
         self.assertIn('"shanshan.zip", "linlin.zip", "pip.zip"', text)
-        self.assertIn('"yeye.zip"', text)
 
     def test_official_archives_use_reproducible_zip_metadata(self):
         expected_timestamp = (1980, 1, 1, 0, 0, 0)
-        for package_id in ("shanshan", "linlin", "pip", "yeye"):
+        for package_id in ("shanshan", "linlin", "pip"):
             with self.subTest(package_id=package_id):
                 with zipfile.ZipFile(
                     ROOT / "character-packs" / f"{package_id}.zip"

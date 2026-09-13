@@ -18,7 +18,7 @@ character ecosystem, and release hardening work.
   identity/core/QA/final review gates, candidate history, static and motion QA,
   and safe installation only after review.
 - v2 character packages with the unified `192 × 208` canvas, multi-frame
-  animation, official SHA-256 verification, and optional Yeye import package.
+  animation, and official SHA-256 verification.
 - Separate voice input/output boundaries, push-to-talk capture, interruption,
   global shortcuts, live-room monitoring, and strict plugin/MCP permission checks.
 - Signed HTTPS update-manifest protocol, downgrade protection, user-data backup,
@@ -29,7 +29,7 @@ character ecosystem, and release hardening work.
 - `Pixkin-1.5.0-win64.zip` — recommended onedir build.
 - `Pixkin-Portable-1.5.0.exe` — single-file portable build.
 - `Pixkin-Setup-1.5.0.exe` — per-user installer.
-- `shanshan.zip`, `linlin.zip`, `pip.zip`, and `yeye.zip` — character packages.
+- `shanshan.zip`, `linlin.zip`, and `pip.zip` — character packages.
 - `SBOM.cdx.json` — CycloneDX dependency inventory.
 - `SHA256SUMS.txt` — SHA-256 checksums for every release asset in the package.
 - `update-stable.json` — signed stable-channel update manifest.

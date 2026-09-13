@@ -107,17 +107,10 @@ try {
         }
     }
 
-    $ImportPackPath = Join-Path $DistPath "Pixkin\可导入角色包"
-    New-Item -ItemType Directory -Path $ImportPackPath | Out-Null
-    Copy-Item -LiteralPath (Join-Path $ProjectRoot "character-packs\yeye.zip") `
-        -Destination (Join-Path $ImportPackPath "椰子.zip")
-
     $FolderZip = Join-Path $ReleasePath "Pixkin-$Version-win64.zip"
     Compress-Archive -Path (Join-Path $DistPath "Pixkin") -DestinationPath $FolderZip -CompressionLevel Optimal
     Copy-Item -LiteralPath (Join-Path $DistPath "Pixkin-Portable-$Version.exe") -Destination $ReleasePath
     Copy-Item -LiteralPath (Join-Path $ProjectRoot "CHARACTER_PACKAGE_SPEC.md") -Destination $ReleasePath
-    Copy-Item -LiteralPath (Join-Path $ProjectRoot "character-packs\yeye.zip") `
-        -Destination (Join-Path $ReleasePath "yeye.zip")
     foreach ($Name in @("shanshan.zip", "linlin.zip", "pip.zip")) {
         Copy-Item -LiteralPath `
             (Join-Path $ProjectRoot "character-packs\$Name") `
