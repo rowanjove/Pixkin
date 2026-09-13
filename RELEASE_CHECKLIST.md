@@ -6,10 +6,10 @@
 ## 1. 冻结发布候选
 
 - [ ] 工作区只包含本次发布需要的改动，已记录候选提交 SHA。
-- [ ] `core/version.py` 中的 `VERSION` 已按语义化版本更新。
-- [ ] 已运行 `py -3.11 scripts\generate_version_info.py`。
-- [ ] 版本资源、README 发行文件名和发布说明使用同一版本号。
-- [ ] Git LFS 文件不是指针文本，内置角色和示例角色包可正常读取。
+- [x] `core/version.py` 中的 `VERSION` 已按语义化版本更新。
+- [x] 已运行 `py -3.11 scripts\generate_version_info.py`。
+- [x] 版本资源、README 发行文件名和发布说明使用同一版本号。
+- [x] Git LFS 文件不是指针文本，内置角色和示例角色包可正常读取。
 
 ## 2. 自动化质量门槛
 
@@ -20,13 +20,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_quality.ps1
 ```
 
 - [ ] 锁定依赖可使用 `--require-hashes` 从干净环境安装。
-- [ ] Ruff 零错误，Pyright 零错误。
-- [ ] 全量测试零失败、零意外跳过。
-- [ ] 项目分支覆盖率不低于 70%，核心模块重点覆盖率没有无说明下降。
+- [x] Ruff 零错误，Pyright 零错误。
+- [x] 全量测试零失败、零意外跳过。
+- [x] 项目分支覆盖率不低于 70%，核心模块重点覆盖率没有无说明下降。
 - [ ] 版本资源、构建资产、角色包、静态 QA、动画 QA 和伙伴工坊测试全部通过。
 - [ ] 基础、标准、完整三档计划量分别保持为 5、20、45；启用安全镜像时完整档为 39。
 - [ ] 匿名问题包的白名单、哈希篡改、越权文件和脱敏测试通过。
-- [ ] `pip-audit` 未发现未处置漏洞，SBOM 已成功生成。
+- [x] `pip-audit` 未发现未处置漏洞，SBOM 已成功生成。
 - [ ] Windows Server 2022/2025、100%/200% DPI 自动兼容矩阵全部通过。
 
 ## 3. 隐私与安全
@@ -53,13 +53,13 @@ py -3.11 -m pip install --require-hashes -r requirements-lock.txt
 powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 ```
 
-- [ ] 构建脚本成功退出，`release/` 只包含本版本计划发布的文件。
-- [ ] `Pixkin-<version>-win64.zip`、`Pixkin-Portable-<version>.exe`、`椰子.zip`、
+- [x] 构建脚本成功退出，`release/` 只包含本版本计划发布的文件。
+- [x] `Pixkin-<version>-win64.zip`、`Pixkin-Portable-<version>.exe`、`椰子.zip`、
   `CHARACTER_PACKAGE_SPEC.md`、`SBOM.cdx.json` 和 `SHA256SUMS.txt` 均存在。
-- [ ] 在重新生成 `SHA256SUMS.txt` 后没有再修改任何发布文件。
-- [ ] 手工复算至少文件夹版 ZIP、便携版 EXE 和角色包的 SHA-256，结果一致。
-- [ ] Inno Setup 安装器使用固定 AppId、当前用户目录，覆盖升级没有改变用户数据目录。
-- [ ] stable 更新清单的 Ed25519 签名、安装器大小和 SHA-256 均使用成品公钥复验通过。
+- [x] 在重新生成 `SHA256SUMS.txt` 后没有再修改任何发布文件。
+- [x] 手工复算至少文件夹版 ZIP、便携版 EXE 和角色包的 SHA-256，结果一致。
+- [x] Inno Setup 安装器使用固定 AppId、当前用户目录，覆盖升级没有改变用户数据目录。
+- [x] stable 更新清单的 Ed25519 签名、安装器大小和 SHA-256 均使用成品公钥复验通过。
 - [ ] 正常安装拒绝降级；受控回滚入口只启动哈希验证通过的上一安装器。
 - [ ] 卸载“保留数据”和“彻底删除数据”两条路径均按选择执行，开机启动项均被清理。
 - [ ] 使用当前候选运行 `scripts\measure_performance.py` 并与同类 Windows
@@ -86,8 +86,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 
 ## 6. 发布与回滚
 
-- [ ] 发布说明列出主要变化、已知限制、兼容性变化和隐私边界。
-- [ ] 明确说明二进制当前是否签名，以及 SmartScreen 的预期表现。
+- [x] 发布说明列出主要变化、已知限制、兼容性变化和隐私边界。
+- [x] 明确说明二进制当前是否签名，以及 SmartScreen 的预期表现。
 - [ ] 上传后重新下载所有资产并按 `SHA256SUMS.txt` 验证。
 - [ ] Git 标签指向已验收的候选提交，标签版本与应用版本一致。
 - [ ] 保留上一稳定版本的下载链接、校验值和回滚说明。

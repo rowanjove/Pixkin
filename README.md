@@ -23,6 +23,25 @@ Pixkin 是面向 Windows 10 / 11 的卡通桌面伙伴。它会随机组合动�
 同时提供 `Pixkin-Portable-1.5.0.exe` 单文件版。单文件版每次启动都要先展开运行环境，
 速度会稍慢，也更容易触发部分安全软件的未知程序提示；日常使用更推荐文件夹版。
 
+完整变化、验证证据和已知限制见
+[v1.5.0 更新说明](docs/RELEASE_NOTES_v1.5.0.md)。
+
+## 界面预览
+
+以下截图来自 v1.5.0 发布候选的隔离配置渲染，不包含真实账号、API Key 或用户数据。
+
+### 对话气泡
+
+![Pixkin 对话气泡](docs/screenshots/chat-window.png)
+
+### 设置中心
+
+![Pixkin 设置中心](docs/screenshots/settings-center.png)
+
+### 伙伴工坊
+
+![Pixkin 伙伴工坊](docs/screenshots/pet-lab.png)
+
 ## 伙伴工坊：用一张图孵化新伙伴
 
 至少添加一张风格示意图，填写名字与性格，即可生成并安装新的桌宠角色包：
