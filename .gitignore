@@ -12,6 +12,8 @@ sbom.json
 build/
 dist/
 release/
+build_*/
+dist_*/
 artifacts/
 .runtime-*/
 config.json

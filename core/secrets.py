@@ -46,20 +46,43 @@ class SecretStore:
                         return False
                 return True
 
-            win32cred.CredWrite(
-                {
-                    "Type": win32cred.CRED_TYPE_GENERIC,
-                    "TargetName": target,
-                    "UserName": "Pixkin",
-                    "CredentialBlob": value,
-                    "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
-                    "Comment": comment,
-                },
-                0,
-            )
-            return True
+            try:
+                win32cred.CredWrite(
+                    {
+                        "Type": win32cred.CRED_TYPE_GENERIC,
+                        "TargetName": target,
+                        "UserName": "Pixkin",
+                        "CredentialBlob": value,
+                        "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
+                        "Comment": comment,
+                    },
+                    0,
+                )
+                return True
+            except Exception as initial_exc:
+                # 企业凭据可能按域策略漫游；不要在机器级凭据失败时
+                # 隐式扩大 API Key 的传播范围，回退只使用当前会话。
+                fallback_persist = getattr(
+                    win32cred, "CRED_PERSIST_SESSION", 1
+                )
+                try:
+                    win32cred.CredWrite(
+                        {
+                            "Type": win32cred.CRED_TYPE_GENERIC,
+                            "TargetName": target,
+                            "UserName": "Pixkin",
+                            "CredentialBlob": value,
+                            "Persist": fallback_persist,
+                            "Comment": comment,
+                        },
+                        0,
+                    )
+                    return True
+                except Exception:
+                    LOGGER.warning("Windows 凭据保存失败: %s", initial_exc)
+                    return False
         except Exception as exc:
-            LOGGER.warning("Windows 凭据保存失败: %s", exc)
+            LOGGER.warning("Windows 凭据操作异常: %s", exc)
             return False
 
     @classmethod

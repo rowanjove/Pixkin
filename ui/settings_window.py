@@ -17,7 +17,7 @@ from core.character_package import (
 )
 from core.config import ConfigManager
 from core.paths import resource_path, user_data_dir
-from core.privacy import privacy_scope_fingerprint
+from core.privacy import model_data_scope, privacy_scope_fingerprint
 from core.secrets import SecretStore
 from core.services.character_service import CharacterService
 from core.services.user_profile_service import (
@@ -34,6 +34,7 @@ from core.services.character_ecosystem_service import (
 from core.services.character_trust_service import OfficialCharacterTrustStore
 from core.services.live_service import LiveService
 from core.services.extension_service import ExtensionManifestError
+from core.runtime.permissions import ContextPermissionService
 from core.version import VERSION
 from ui.settings_character_components import CharacterManagerPanel
 from ui.live_settings_components import LiveRoomEditor
@@ -50,6 +51,8 @@ from ui.character_ecosystem_components import (
     CharacterPackageInspectorDialog,
 )
 from ui.extension_settings_components import ExtensionSettingsPanel
+from ui.proactive_settings_components import ProactiveSettingsPanel
+from ui.voice_output_components import VoiceOutputSettingsPanel
 
 
 class SettingsWindow(QDialog):
@@ -77,6 +80,8 @@ class SettingsWindow(QDialog):
         memory_service: MemoryService = None,
         active_character_id: str = "",
         live_providers=None,
+        provider_catalog=None,
+        context_permission_service: ContextPermissionService = None,
     ):
         super().__init__(parent)
         self.config_manager = config_manager
@@ -99,6 +104,8 @@ class SettingsWindow(QDialog):
         self.memory_service = memory_service
         self.active_character_id = str(active_character_id or "default")
         self.live_providers = live_providers
+        self.provider_catalog = provider_catalog or {}
+        self.context_permission_service = context_permission_service
         self.character_changed = False
         self._user_avatar_source_value = str(
             self.config_manager.get("user", "avatar_path", "") or ""
@@ -408,6 +415,8 @@ class SettingsWindow(QDialog):
         self.model_settings_panel = ModelSettingsPanel(
             self.config_manager,
             self.session_secret_store,
+            provider_registry=self.provider_catalog.get("chat"),
+            permission_service=self.context_permission_service,
         )
         for name in (
             "api_url_input",
@@ -720,6 +729,15 @@ class SettingsWindow(QDialog):
         )
         startup_layout.addWidget(self.startup_cb)
         layout.addWidget(startup_card)
+
+        proactive_card, proactive_layout = self._card(
+            "主动关怀与桌面感知",
+            "在本地感知前台专注状态，非侵入式提供适时的疲劳与深夜陪伴提醒。",
+        )
+        self.proactive_panel = ProactiveSettingsPanel(self.config_manager)
+        proactive_layout.addWidget(self.proactive_panel)
+        layout.addWidget(proactive_card)
+
         layout.addStretch()
         return page
 
@@ -741,7 +759,22 @@ class SettingsWindow(QDialog):
             self.session_secret_store,
         )
         card_layout.addWidget(self.voice_panel)
-        layout.addWidget(card, 1)
+        layout.addWidget(card)
+
+        tts_card, tts_card_layout = self._card(
+            "桌宠语音发声 (TTS)",
+            "回复时同步发音，支持 Windows 原生免配置离线音色与云端端点。",
+        )
+        self.voice_output_panel = VoiceOutputSettingsPanel(
+            self.config_manager,
+            provider_registry=self.provider_catalog.get("tts"),
+            session_secrets=self.session_secret_store,
+            permission_service=self.context_permission_service,
+        )
+        tts_card_layout.addWidget(self.voice_output_panel)
+        layout.addWidget(tts_card)
+
+        layout.addStretch()
         return page
 
     def _build_memory_page(self):
@@ -804,6 +837,8 @@ class SettingsWindow(QDialog):
             audit_store=self.tool_audit_store,
             diagnostic_service=self.diagnostic_bundle_service,
             local_backup_service=self.local_data_backup_service,
+            config_manager=self.config_manager,
+            context_permission_service=self.context_permission_service,
         )
         self.privacy_panel.history_changed.connect(
             self.history_changed.emit
@@ -839,6 +874,7 @@ class SettingsWindow(QDialog):
                     "app", "automatic_updates", True
                 )
             ),
+            permission_service=self.context_permission_service,
         )
         self.update_panel.install_requested.connect(
             self.install_update_requested.emit
@@ -975,7 +1011,9 @@ class SettingsWindow(QDialog):
             self.package_manager,
             self,
             character_service=self.character_service,
+            context_permission_service=self.context_permission_service,
             session_secret_store=self.session_secret_store,
+            provider_catalog=self.provider_catalog,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1308,8 +1346,8 @@ class SettingsWindow(QDialog):
         model_fingerprint = privacy_scope_fingerprint(
             endpoint=base_url,
             model=model,
-            data_scope=(
-                "system_prompt_user_message_recent_history_and_memories"
+            data_scope=model_data_scope(
+                self.privacy_panel.effective_context_permissions()
             ),
         )
         previous_model_fingerprint = str(
@@ -1405,6 +1443,7 @@ class SettingsWindow(QDialog):
                 "model_notice_fingerprint": (
                     model_fingerprint if preserve_model_notice else ""
                 ),
+                "context_permissions": self.privacy_panel.context_permissions(),
             },
             "voice_input": {
                 "enabled": voice.enabled,
@@ -1417,6 +1456,24 @@ class SettingsWindow(QDialog):
                 ),
                 "hotkeys_enabled": voice.hotkeys_enabled,
                 "hotkeys": voice.hotkeys,
+            },
+            "voice_output": {
+                "enabled": self.voice_output_panel.values().enabled,
+                "provider": self.voice_output_panel.values().provider,
+                "voice": self.voice_output_panel.values().voice,
+                "speed": self.voice_output_panel.values().speed,
+                "base_url": self.voice_output_panel.values().base_url,
+                "model": self.voice_output_panel.values().model,
+            },
+            "proactive": {
+                "enabled": self.proactive_panel.values().enabled,
+                "quiet_fullscreen": self.proactive_panel.values().quiet_fullscreen,
+                "work_stretch_reminder": self.proactive_panel.values().work_stretch_reminder,
+                "work_stretch_interval_minutes": self.proactive_panel.values().work_stretch_interval_minutes,
+                "sleep_guard": self.proactive_panel.values().sleep_guard,
+                "sleep_guard_hour": 23,
+                "sleep_guard_minute": 30,
+                "min_prompt_interval_seconds": 3600,
             },
             "character_behavior_overrides": (
                 self.behavior_editor.values()

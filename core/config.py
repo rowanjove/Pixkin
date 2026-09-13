@@ -58,6 +58,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "history_retention_days": -1,
         "model_notice_acknowledged": False,
         "model_notice_fingerprint": "",
+        "context_permissions": {
+            "window_metadata": "deny",
+            "system_state": "deny",
+            "clipboard": "deny",
+            "screen": "deny",
+            "plugin": "deny",
+            "mcp": "deny",
+            "microphone": "deny",
+            "camera": "deny",
+            "filesystem": "deny",
+            "network": "deny",
+            "external_action": "deny",
+        },
     },
     "voice_input": {
         "enabled": False,
@@ -73,6 +86,26 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "stop_generation": "Ctrl+Alt+S",
             "mute_voice": "Ctrl+Alt+M",
         },
+    },
+    "voice_output": {
+        "enabled": False,
+        "provider": "windows_sapi",
+        "voice": "",
+        "speed": 1.0,
+        "base_url": "https://api.openai.com/v1",
+        "model": "tts-1",
+    },
+    "proactive": {
+        # Desktop context observation is opt-in until the unified permission
+        # service is enabled for each individual sensor.
+        "enabled": False,
+        "quiet_fullscreen": True,
+        "work_stretch_reminder": True,
+        "work_stretch_interval_minutes": 90,
+        "sleep_guard": False,
+        "sleep_guard_hour": 23,
+        "sleep_guard_minute": 30,
+        "min_prompt_interval_seconds": 3600,
     },
     "app": {
         "first_run_complete": False,

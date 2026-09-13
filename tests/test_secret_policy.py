@@ -12,6 +12,11 @@ from core.character_package import CharacterPackageManager
 from core.config import ConfigManager
 from core.secrets import SecretStore
 from core.services.session_secret_store import SessionSecretStore
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionResource,
+    PermissionState,
+)
 from main import DesktopPetApp
 from ui.pet_lab_window import PetLabWindow
 from ui.settings_window import SettingsWindow
@@ -111,6 +116,11 @@ class SecretMigrationTests(unittest.TestCase):
             )
         )
         controller.ai_worker = None
+        controller.context_permission_service = ContextPermissionService()
+        controller.context_permission_service.set_state(
+            PermissionResource.NETWORK,
+            PermissionState.ALLOW_SESSION,
+        )
         controller.tool_registry = MagicMock()
         controller.chat_session = MagicMock()
         controller.chat_session.context.return_value = []
@@ -198,7 +208,17 @@ class SecretUiPolicyTests(unittest.TestCase):
                 config,
                 base / "characters",
             )
-            lab = PetLabWindow(config, manager)
+            permissions = ContextPermissionService()
+            permissions.set_state(
+                PermissionResource.NETWORK,
+                PermissionState.ALLOW_SESSION,
+                session_only=True,
+            )
+            lab = PetLabWindow(
+                config,
+                manager,
+                context_permission_service=permissions,
+            )
             lab.reference_paths = [base / "reference.png"]
             lab.name_input.setText("安全伙伴")
             lab.api_key.setText("new-image-secret")
@@ -279,6 +299,9 @@ class SecretUiPolicyTests(unittest.TestCase):
                 config,
                 manager,
                 session_secret_store=session_secrets,
+                context_permission_service=(
+                    self._allowed_network_permissions()
+                ),
             )
             lab.reference_paths = [base / "reference.png"]
             lab.name_input.setText("会话伙伴")
@@ -312,6 +335,16 @@ class SecretUiPolicyTests(unittest.TestCase):
             start_worker.assert_called_once()
             lab.close()
 
+    @staticmethod
+    def _allowed_network_permissions():
+        permissions = ContextPermissionService()
+        permissions.set_state(
+            PermissionResource.NETWORK,
+            PermissionState.ALLOW_SESSION,
+            session_only=True,
+        )
+        return permissions
+
     def test_runtime_prefers_session_chat_key(self):
         controller = DesktopPetApp.__new__(DesktopPetApp)
         controller.session_secrets = SessionSecretStore()
@@ -324,3 +357,20 @@ class SecretUiPolicyTests(unittest.TestCase):
             self.assertEqual(controller._chat_api_key(), "session-key")
 
         persistent.assert_not_called()
+
+    def test_write_falls_back_to_session_persistence_on_machine_failure(self):
+        fake_win32cred = MagicMock()
+        fake_win32cred.CRED_TYPE_GENERIC = 1
+        fake_win32cred.CRED_PERSIST_LOCAL_MACHINE = 2
+        fake_win32cred.CRED_PERSIST_SESSION = 1
+        # 第一次写（LOCAL_MACHINE）抛异常，第二次写（SESSION）成功
+        fake_win32cred.CredWrite.side_effect = [OSError("Access denied"), None]
+
+        with patch.dict("sys.modules", {"win32cred": fake_win32cred}):
+            success = SecretStore._write("TestTarget", "secret", "comment")
+            self.assertTrue(success)
+            self.assertEqual(fake_win32cred.CredWrite.call_count, 2)
+            first_call_persist = fake_win32cred.CredWrite.call_args_list[0][0][0]["Persist"]
+            second_call_persist = fake_win32cred.CredWrite.call_args_list[1][0][0]["Persist"]
+            self.assertEqual(first_call_persist, 2)
+            self.assertEqual(second_call_persist, 1)

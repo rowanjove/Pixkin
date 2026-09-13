@@ -32,6 +32,13 @@ a = Analysis(
     noarchive=False,
     optimize=1,
 )
+# Do not bundle Poppler's ICU 78 DLLs discovered through PATH.  Qt6Core uses
+# the Windows ICU shim (System32); bundling the incompatible versioned exports
+# breaks QtCore import in the one-file executable.
+a.binaries = [
+    entry for entry in a.binaries
+    if not Path(str(entry[0])).name.lower().startswith("icu")
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

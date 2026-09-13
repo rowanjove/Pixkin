@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import IntEnum
+from threading import RLock
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -47,6 +48,9 @@ class ToolAuditEvent:
     result_status: str
     duration_ms: int
     session_id: str = ""
+    character_id: str = ""
+    plugin_id: str = ""
+    user_confirmed: bool = False
 
 
 class ToolPermissionService:
@@ -75,6 +79,7 @@ class ToolPermissionService:
         self.audit_sink = audit_sink
         self.session_id_provider = session_id_provider
         self._events: list[ToolAuditEvent] = []
+        self._events_lock = RLock()
 
     def authorize(
         self,
@@ -99,10 +104,17 @@ class ToolPermissionService:
                 "L0 只读工具允许自动执行",
             )
         elif level == ToolPermissionLevel.EXTERNAL_ACTION:
-            confirmed = bool(
-                self.confirm_external
-                and self.confirm_external(request)
-            )
+            try:
+                confirmed = bool(
+                    self.confirm_external
+                    and self.confirm_external(request)
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "工具确认回调失败（%s）",
+                    type(exc).__name__,
+                )
+                confirmed = False
             decision = ToolPermissionDecision(
                 confirmed,
                 "user_confirmed" if confirmed else "denied",
@@ -127,7 +139,22 @@ class ToolPermissionService:
         *,
         result_status: str,
         duration_ms: int,
+        context: Any | None = None,
     ) -> ToolAuditEvent:
+        def context_value(key: str, default: Any = ""):
+            if isinstance(context, Mapping):
+                return context.get(key, default)
+            return getattr(context, key, default)
+
+        session_id = str(context_value("session_id") or "")
+        if not session_id and self.session_id_provider is not None:
+            try:
+                session_id = str(self.session_id_provider() or "")
+            except Exception as exc:
+                LOGGER.warning(
+                    "工具审计会话标识读取失败（%s）",
+                    type(exc).__name__,
+                )
         event = ToolAuditEvent(
             timestamp=self.clock(),
             tool_name=request.tool_name,
@@ -136,13 +163,18 @@ class ToolPermissionService:
             authorization=decision.authorization,
             result_status=result_status,
             duration_ms=max(0, int(duration_ms)),
-            session_id=(
-                str(self.session_id_provider() or "")
-                if self.session_id_provider is not None
-                else ""
+            session_id=session_id,
+            character_id=str(context_value("character_id") or ""),
+            plugin_id=str(context_value("plugin_id") or ""),
+            user_confirmed=bool(
+                context_value(
+                    "user_confirmed",
+                    decision.authorization == "user_confirmed",
+                )
             ),
         )
-        self._events.append(event)
+        with self._events_lock:
+            self._events.append(event)
         if self.audit_sink is not None:
             try:
                 self.audit_sink(event)
@@ -154,7 +186,8 @@ class ToolPermissionService:
         return event
 
     def events(self) -> tuple[ToolAuditEvent, ...]:
-        return tuple(self._events)
+        with self._events_lock:
+            return tuple(self._events)
 
     @staticmethod
     def authorization_fingerprint(

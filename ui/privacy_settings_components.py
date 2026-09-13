@@ -21,6 +21,7 @@ from core.services.local_data_backup_service import (
     LocalDataBackupError,
     LocalDataBackupService,
 )
+from core.runtime.permissions import PermissionResource, PermissionState
 from ui.tool_audit_window import ToolAuditWindow
 
 
@@ -37,6 +38,8 @@ class PrivacySettingsPanel(QWidget):
         audit_store: ToolAuditStore | None,
         diagnostic_service: DiagnosticBundleService | None = None,
         local_backup_service: LocalDataBackupService | None = None,
+        config_manager=None,
+        context_permission_service=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -44,6 +47,9 @@ class PrivacySettingsPanel(QWidget):
         self.audit_store = audit_store
         self.diagnostic_service = diagnostic_service
         self.local_backup_service = local_backup_service
+        self.config_manager = config_manager
+        self.context_permission_service = context_permission_service
+        self.context_permission_combos = {}
         self._audit_window = None
         self._build_ui(retention_days)
 
@@ -75,6 +81,62 @@ class PrivacySettingsPanel(QWidget):
         notice.setWordWrap(True)
         notice.setObjectName("muted")
         layout.addWidget(notice)
+
+        context_title = QLabel("桌面感知权限")
+        context_title.setObjectName("sectionTitle")
+        layout.addWidget(context_title)
+        context_hint = QLabel(
+            "默认拒绝。只有允许后，Pixkin 才会读取对应桌面信息；"
+            "原始内容不写入日志。"
+        )
+        context_hint.setWordWrap(True)
+        context_hint.setObjectName("muted")
+        layout.addWidget(context_hint)
+        saved_permissions = {}
+        if self.config_manager is not None:
+            raw = self.config_manager.get(
+                "privacy", "context_permissions", {}
+            )
+            if isinstance(raw, dict):
+                saved_permissions = raw
+        for resource, label in (
+            (PermissionResource.WINDOW_METADATA, "前台窗口与进程名"),
+            (PermissionResource.SYSTEM_STATE, "系统空闲时间"),
+            (PermissionResource.CLIPBOARD, "剪贴板文本"),
+            (PermissionResource.SCREEN, "屏幕截图（仅按需）"),
+            (PermissionResource.PLUGIN, "第三方插件进程"),
+            (PermissionResource.MCP, "MCP 外部工具"),
+            (PermissionResource.MICROPHONE, "麦克风录音"),
+            (PermissionResource.CAMERA, "摄像头（当前未持续采集）"),
+            (PermissionResource.FILESYSTEM, "文件访问（按工具请求）"),
+            (PermissionResource.NETWORK, "网络访问（按 Provider/工具请求）"),
+            (PermissionResource.EXTERNAL_ACTION, "外部动作（按次确认）"),
+        ):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            combo = QComboBox()
+            for state, state_label in (
+                (PermissionState.DENY, "拒绝"),
+                (PermissionState.ASK, "每次询问"),
+                (PermissionState.ALLOW_SESSION, "本次运行"),
+                (PermissionState.ALLOW_ALWAYS, "始终允许"),
+            ):
+                combo.addItem(state_label, state.value)
+            try:
+                if self.context_permission_service is not None:
+                    saved = self.context_permission_service.state(resource).value
+                else:
+                    saved = PermissionState(
+                        saved_permissions.get(resource.value, PermissionState.DENY.value)
+                    ).value
+                index = combo.findData(saved)
+                combo.setCurrentIndex(max(0, index))
+            except ValueError:
+                combo.setCurrentIndex(0)
+            row.addWidget(combo)
+            row.addStretch()
+            layout.addLayout(row)
+            self.context_permission_combos[resource] = combo
 
         location = QLabel(
             "本地聊天库："
@@ -126,6 +188,35 @@ class PrivacySettingsPanel(QWidget):
 
     def retention_days(self) -> int:
         return int(self.retention_combo.currentData())
+
+    def context_permissions(self) -> dict[str, str]:
+        # Persisting a session choice as DENY clears an older persistent grant;
+        # the owning application reapplies the in-memory session grant after
+        # saving this settings page. This prevents an ``ALLOW_ALWAYS`` value
+        # from surviving when the user downgrades it to this-run access.
+        return {
+            resource.value: (
+                PermissionState.DENY.value
+                if combo.currentData() == PermissionState.ALLOW_SESSION.value
+                else str(combo.currentData())
+            )
+            for resource, combo in self.context_permission_combos.items()
+        }
+
+    def effective_context_permissions(self) -> dict[str, str]:
+        """Return the runtime state shown in the controls, including session grants."""
+        return {
+            resource.value: str(combo.currentData())
+            for resource, combo in self.context_permission_combos.items()
+        }
+
+    def context_session_permissions(self) -> tuple[PermissionResource, ...]:
+        """Return grants that should live only until the current process exits."""
+        return tuple(
+            resource
+            for resource, combo in self.context_permission_combos.items()
+            if combo.currentData() == PermissionState.ALLOW_SESSION.value
+        )
 
     def _open_audit(self) -> None:
         if self.audit_store is None:
@@ -201,7 +292,7 @@ class PrivacySettingsPanel(QWidget):
         QMessageBox.information(
             self,
             "备份完成",
-            "备份包含配置、聊天、角色、头像和孵化任务，"
+            "备份包含配置、聊天、角色、头像、孵化任务、插件、审计和崩溃记录，"
             "可能含私人内容，请妥善保存：\n"
             f"{target}",
         )

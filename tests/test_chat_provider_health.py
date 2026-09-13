@@ -24,6 +24,22 @@ class FakeError(Exception):
 
 
 class ChatProviderHealthTests(unittest.TestCase):
+    def test_provider_rejects_insecure_or_credentialed_endpoints(self):
+        client = SimpleNamespace(close=lambda: None)
+        for endpoint in (
+            "http://example.test/v1",
+            "https://user:secret@example.test/v1",
+            "https://example.test/v1?token=leak",
+            "https://example.test/v1#fragment",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaises(ValueError):
+                    OpenAICompatibleChatProvider(
+                        api_key="key",
+                        base_url=endpoint,
+                        client=client,
+                    )
+
     def test_health_lists_models_and_accepts_configured_model(self):
         client = SimpleNamespace(
             models=SimpleNamespace(

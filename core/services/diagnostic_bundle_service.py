@@ -105,6 +105,8 @@ class DiagnosticBundleService:
             )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DiagnosticBundleError("诊断包清单无效") from exc
+        if not isinstance(manifest, dict):
+            raise DiagnosticBundleError("诊断包清单根节点必须是对象")
         if manifest.get("schema_version") != self.SCHEMA_VERSION:
             raise DiagnosticBundleError("诊断包版本不兼容")
         privacy = manifest.get("privacy")

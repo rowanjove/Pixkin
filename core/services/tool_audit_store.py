@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -59,19 +60,42 @@ class ToolAuditStore:
             return []
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(payload, Mapping):
+                raise ValueError("审计文件根节点必须是对象")
             if payload.get("schema_version") != self.SCHEMA_VERSION:
-                return []
+                raise ValueError("审计文件版本不兼容")
             raw_events = payload.get("events")
             if not isinstance(raw_events, list):
-                return []
+                raise ValueError("审计文件事件列表无效")
             events = [
                 self._event_from_dict(item)
                 for item in raw_events[-self.max_events :]
                 if isinstance(item, Mapping)
             ]
             return self._trim_to_size(events)
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
+            self._quarantine_corrupt_file()
             return []
+
+    def _quarantine_corrupt_file(self) -> None:
+        """隔离损坏的审计文件，避免它阻断下一次启动。"""
+
+        if not self.path.is_file():
+            return
+        quarantine = self.path.with_name(
+            f"{self.path.name}.corrupt-{uuid.uuid4().hex}"
+        )
+        try:
+            os.replace(self.path, quarantine)
+        except OSError:
+            # 审计数据不能阻断主流程；无法移动时仍以空 store 继续。
+            return
 
     def _trim_to_size(
         self,

@@ -10,14 +10,17 @@ Pixkin 是面向 Windows 10 / 11 的卡通桌面伙伴。它会随机组合动�
 
 ## 用户使用
 
-推荐下载兼容性优先的 `Pixkin-1.3.0-win64.zip`：
+当前公开版本线固定为 `v1.5.0`。该版本的能力验收对齐升级规划中的
+`v2.0.0` 里程碑；`2.0.0` 仅作为内部能力标记，不作为公开版本号。
+
+推荐下载兼容性优先的 `Pixkin-1.5.0-win64.zip`：
 
 1. 解压完整的 `Pixkin` 文件夹。
 2. 双击 `Pixkin.exe`。
 3. 首次启动默认使用内置伙伴山山，也可在设置中切换到凛凛、Pip，或导入 ZIP 角色包。
 4. 点击桌宠打开带头像的对话气泡；从托盘进入设置或伙伴工坊。
 
-同时提供 `Pixkin-Portable-1.3.0.exe` 单文件版。单文件版每次启动都要先展开运行环境，
+同时提供 `Pixkin-Portable-1.5.0.exe` 单文件版。单文件版每次启动都要先展开运行环境，
 速度会稍慢，也更容易触发部分安全软件的未知程序提示；日常使用更推荐文件夹版。
 
 ## 伙伴工坊：用一张图孵化新伙伴
@@ -113,6 +116,23 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 - 支持快速/均衡/深入预设、停止生成、失败重试、编辑重发，以及延迟/token/费用估算。
 - 模型任务会在发送前检查流式和 Tool Calls 能力。
 
+## Runtime 2.0 能力（公开版本仍为 1.5.0）
+
+- `PixkinKernel`、`ServiceContainer`、`EventBus` 和 `ActionDispatcher` 提供统一生命周期、事件和副作用边界。
+- Chat / Image / TTS 以及 ASR、Vision、Embedding、Realtime、Trigger 均通过 Provider Registry 扩展；模型能力可由 `ModelProfile` 描述和覆盖。
+- 桌面感知默认拒绝，支持窗口、进程、空闲时间、剪贴板和按需截图；上下文投影按问题相关性和字符预算注入，不落盘原始桌面内容。
+- Memory 2.0 使用 SQLite + FTS5，保留逐条确认、版本、冲突 supersede、禁用、审计和旧 JSON 幂等迁移。
+- 角色状态会恢复心情、精力、注意力、无聊度、亲密度和活动；语音状态机支持 listening / thinking / talking / interrupted。
+- 第三方插件使用严格 manifest、权限声明和独立进程 JSON-RPC；进程/Job Object
+  只提供故障隔离，不是文件系统或网络沙箱，启动前必须明确受信。MCP 支持
+  stdio 与 Streamable HTTP，工具仍经过 Pixkin 权限和超时审计。
+- 通过 Python entry point 安装的 Live provider 属于主进程内受信代码，显式启用
+  只表示用户同意加载，不提供第三方代码沙箱；需要隔离的扩展应使用进程插件。
+- 支持 Character Card v1/v2 导入、v2 JSON 导出；角色包解析器兼容 v1/v2 并接受带 Renderer、Voice、Memory Policy、Capabilities 的 v3 扩展字段。
+
+详细的阶段验收、迁移顺序和未纳入本版本的外部适配器见
+[`docs/ROADMAP_1.5_CAPABILITY_2.0.md`](docs/ROADMAP_1.5_CAPABILITY_2.0.md)。
+
 ## 语音与快捷键
 
 - 语音默认关闭；启用后只有按住说话期间访问麦克风，松开后立即停止。
@@ -127,6 +147,7 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 - 仅在“未开播 → 开播”状态变化时弹出开播提醒气泡。
 - 可选择程序启动时发现正在直播也提醒。
 - 支持房间分组、跨午夜免打扰、静默结束后补提醒和可选重复提醒。
+- 常驻监听需要会话级或永久网络授权，单次 ASK 同意不会延长为后台常驻访问。
 - 平台凭据按房间隔离保存；配置中的明文 cookie 不会被内置 Provider 使用。
 - 外部平台适配器必须显式启用并通过 URL 安全和能力契约。
 
@@ -140,7 +161,8 @@ v2 角色包支持独立帧、动作条和图集，并按基础级、标准级�
 - 聊天历史保存在本机 `%LOCALAPPDATA%\Pixkin\chat-history.sqlite3`，不会自动上传。
 - 老版 `%LOCALAPPDATA%\DesktopPet` 数据会在首次运行时迁移。
 - API Key 只持久化到 Windows Credential Manager，也可选择仅本次运行保存在内存。
-- 首次发送给模型前会展示目标接口、发送范围和本地保存说明。
+- 首次发送给模型前会展示目标接口、实际授权的桌面上下文类别、长期记忆范围和本地保存说明；
+  桌面上下文授权范围发生变化时会重新确认。
 - 日志、聊天数据库、工具审计和问题包会脱敏常见密钥格式。
 - 官方角色包由内置 SHA-256 清单验证；第三方包安装前显示作者、许可、资源数和指纹。
 - 独立角色检查器可在不安装时预览、检查兼容性和完整指纹；第三方作者声明不自动受信。
@@ -222,9 +244,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 
 ```text
 release/
-├─ Pixkin-1.3.0-win64.zip
-├─ Pixkin-Portable-1.3.0.exe
-├─ Pixkin-Setup-1.3.0.exe
+├─ Pixkin-1.5.0-win64.zip
+├─ Pixkin-Portable-1.5.0.exe
+├─ Pixkin-Setup-1.5.0.exe
 ├─ update-stable.json（正式 Release）
 ├─ shanshan.zip、linlin.zip、pip.zip
 ├─ yeye.zip（椰子角色包）

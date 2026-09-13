@@ -17,17 +17,35 @@ from core.services.voice_input_service import (
     VoiceInputError,
     VoiceTranscriptionService,
 )
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionResource,
+    PermissionState,
+)
 from ui.voice_input_components import VoiceSettingsPanel
 
 
 class Response:
     status_code = 200
+    headers = {}
+    content = b'{"text":"\\u8f6c\\u5199\\u7ed3\\u679c"}'
+
+    def close(self):
+        return None
 
     def raise_for_status(self):
         return None
 
     def json(self):
         return {"text": "转写结果"}
+
+
+class StreamingResponse(Response):
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def iter_content(self, *, chunk_size):
+        return iter(self.chunks)
 
 
 class VoiceAndHotkeyTests(unittest.TestCase):
@@ -37,11 +55,17 @@ class VoiceAndHotkeyTests(unittest.TestCase):
 
     def test_voice_endpoint_requires_https_and_disables_redirects(self):
         calls = []
+        permissions = ContextPermissionService()
+        permissions.set_state(
+            PermissionResource.NETWORK,
+            PermissionState.ALLOW_SESSION,
+        )
         service = VoiceTranscriptionService(
             VoiceEndpoint("https://voice.example/v1", "whisper-1"),
             post=lambda *args, **kwargs: (
                 calls.append((args, kwargs)) or Response()
             ),
+            permission_service=permissions,
         )
 
         result = service.transcribe(b"RIFF-audio", api_key="secret")
@@ -60,15 +84,45 @@ class VoiceAndHotkeyTests(unittest.TestCase):
             VoiceEndpoint("http://voice.example/v1", "model").transcription_url()
 
     def test_voice_service_requires_independent_key_and_bounded_audio(self):
+        permissions = ContextPermissionService()
+        permissions.set_state(
+            PermissionResource.NETWORK,
+            PermissionState.ALLOW_SESSION,
+        )
         service = VoiceTranscriptionService(
             VoiceEndpoint("https://voice.example/v1", "model"),
             post=MagicMock(),
+            permission_service=permissions,
         )
 
         with self.assertRaises(VoiceInputError):
             service.transcribe(b"audio", api_key="")
         with self.assertRaises(VoiceInputError):
             service.transcribe(b"", api_key="secret")
+
+    def test_voice_service_defaults_to_network_deny(self):
+        service = VoiceTranscriptionService(
+            VoiceEndpoint("https://voice.example/v1", "model"),
+            post=MagicMock(),
+        )
+        with self.assertRaisesRegex(VoiceInputError, "网络权限未允许"):
+            service.transcribe(b"audio", api_key="secret")
+
+    def test_voice_service_bounds_streamed_response_before_json_parse(self):
+        permissions = ContextPermissionService()
+        permissions.set_state(
+            PermissionResource.NETWORK,
+            PermissionState.ALLOW_SESSION,
+        )
+        service = VoiceTranscriptionService(
+            VoiceEndpoint("https://voice.example/v1", "model"),
+            post=lambda *args, **kwargs: StreamingResponse(
+                [b"{" + b'"text":"ok"}' + b"x" * (2 * 1024 * 1024)]
+            ),
+            permission_service=permissions,
+        )
+        with self.assertRaisesRegex(VoiceInputError, "超过大小上限"):
+            service.transcribe(b"audio", api_key="secret")
 
     def test_hotkeys_parse_register_conflict_and_cleanup(self):
         registrations = []

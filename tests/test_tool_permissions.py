@@ -50,10 +50,11 @@ class ToolPermissionTests(unittest.TestCase):
         )
         registry = ToolRegistry(permissions)
 
-        with patch(
-            "core.tool_registry.webbrowser.open",
-            return_value=True,
-        ) as open_url:
+        with patch.object(
+            registry,
+            "_execute_isolated",
+            return_value="已使用默认浏览器打开：https://example.com/path",
+        ) as execute_isolated:
             result = registry.execute_tool(
                 "open_url",
                 {"url": "https://example.com/path"},
@@ -61,7 +62,7 @@ class ToolPermissionTests(unittest.TestCase):
 
         self.assertIn("已使用默认浏览器打开", result)
         self.assertEqual(len(requests), 1)
-        open_url.assert_called_once()
+        execute_isolated.assert_called_once()
         self.assertEqual(
             permissions.events()[-1].authorization,
             "user_confirmed",

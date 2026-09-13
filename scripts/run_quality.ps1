@@ -43,6 +43,9 @@ try {
         "-m", "ruff", "check",
         "core", "ui", "scripts", "tests", "main.py", "preview_ui.py"
     )
+    Invoke-PythonStep -Name "Architecture" -Arguments @(
+        "scripts\check_architecture.py"
+    )
     Invoke-PythonStep -Name "Pyright" -Arguments @(
         "-m", "pyright", "--pythonpath", $PythonExecutable
     )

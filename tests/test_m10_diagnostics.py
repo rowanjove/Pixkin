@@ -111,6 +111,28 @@ class DiagnosticBundleTests(unittest.TestCase):
             with self.assertRaises(DiagnosticBundleError):
                 service.inspect(target)
 
+    def test_manifest_root_and_encoding_are_rejected_as_domain_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            service = DiagnosticBundleService(
+                CrashReportStore(base / "crashes")
+            )
+            target = service.export(base / "support.zip")
+            with zipfile.ZipFile(target) as source:
+                documents = {
+                    name: source.read(name)
+                    for name in source.namelist()
+                }
+            documents["manifest.json"] = b"[]"
+            with zipfile.ZipFile(target, "w") as archive:
+                for name, content in documents.items():
+                    archive.writestr(name, content)
+            with self.assertRaisesRegex(
+                DiagnosticBundleError,
+                "根节点",
+            ):
+                service.inspect(target)
+
 
 class StructuredLoggingTests(unittest.TestCase):
     def test_event_has_versioned_contract_and_redacted_fields(self):

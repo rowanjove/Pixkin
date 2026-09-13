@@ -10,8 +10,15 @@ from core.privacy import redact_text, redact_value
 from core.services.chat_experience_service import (
     require_chat_capabilities,
 )
+from core.pet_animator import PetState
 from core.providers.chat.base import ChatMessage, ChatProvider
-from core.tool_registry import ToolRegistry
+from core.services.emotion_service import StreamingEmotionFilter, extract_emotions
+from core.tool_registry import (
+    MAX_TOOL_RESULT_CHARS,
+    ToolExecutionContext,
+    ToolRegistry,
+    bound_tool_result,
+)
 
 
 LOGGER = logging.getLogger("desktop_pet.chat_service")
@@ -185,6 +192,10 @@ class ChatSessionService:
 class ChatService:
     """Own chat policy while leaving thread lifecycle to the caller."""
 
+    MAX_REQUEST_CHARS = 96 * 1024
+    MAX_MESSAGE_CONTENT_CHARS = 24 * 1024
+    MAX_TOOL_SCHEMA_CHARS = 32 * 1024
+
     def __init__(
         self,
         *,
@@ -194,6 +205,7 @@ class ChatService:
         messages: List[ChatMessage],
         tool_registry: ToolRegistry,
         max_tool_rounds: int = 4,
+        execution_context: ToolExecutionContext | None = None,
     ):
         self.provider = provider
         self.model = model
@@ -201,6 +213,7 @@ class ChatService:
         self.messages = [dict(message) for message in messages]
         self.tool_registry = tool_registry
         self.max_tool_rounds = max(1, int(max_tool_rounds))
+        self.execution_context = execution_context
 
     def run(
         self,
@@ -208,6 +221,7 @@ class ChatService:
         on_chunk: Callable[[str], None],
         on_tool_executing: Callable[[str], None],
         is_cancelled: Callable[[], bool],
+        on_emotion: Optional[Callable[[PetState], None]] = None,
     ) -> Optional[str]:
         full_messages: List[ChatMessage] = [
             {"role": "system", "content": self.system_prompt}
@@ -219,20 +233,45 @@ class ChatService:
             has_tools=bool(tools),
         )
 
+        emotion_filter = StreamingEmotionFilter()
+
+        def filtered_on_chunk(chunk: str) -> None:
+            if on_emotion is not None:
+                clean_chunk, emotions = emotion_filter.process_chunk(chunk)
+                for em in emotions:
+                    on_emotion(em)
+                if clean_chunk:
+                    on_chunk(clean_chunk)
+            else:
+                on_chunk(chunk)
+
+        tools_size = self._json_size(tools)
+        if tools_size > self.MAX_TOOL_SCHEMA_CHARS:
+            raise RuntimeError("工具定义超过安全大小上限，已停止本次请求")
+
         for _ in range(self.max_tool_rounds):
             if is_cancelled():
                 return None
+            request_messages = self._bounded_messages(full_messages)
+            if self._json_size(request_messages) + tools_size > self.MAX_REQUEST_CHARS:
+                raise RuntimeError("模型请求上下文超过安全大小上限，已停止本次请求")
             completion = self.provider.stream_completion(
                 model=self.model,
-                messages=full_messages,
+                messages=request_messages,
                 tools=tools,
-                on_chunk=on_chunk,
+                on_chunk=filtered_on_chunk,
                 is_cancelled=is_cancelled,
             )
             if is_cancelled():
                 return None
+            if on_emotion is not None:
+                leftover = emotion_filter.flush()
+                if leftover:
+                    on_chunk(leftover)
+
+            clean_text, _ = extract_emotions(completion.text)
             if not completion.tool_calls:
-                return completion.text
+                return clean_text
 
             full_messages.append(
                 {
@@ -244,18 +283,38 @@ class ChatService:
             for tool_call in completion.tool_calls:
                 function = tool_call["function"]
                 function_name = str(function["name"])
-                function_args = self._tool_arguments(function)
                 on_tool_executing(function_name)
-                tool_result = self.tool_registry.execute_tool(
-                    function_name,
-                    function_args,
-                )
+                try:
+                    function_args = self._tool_arguments(function)
+                except ValueError as exc:
+                    # Do not silently turn malformed model output into `{}`:
+                    # that can accidentally invoke a no-argument or
+                    # permissive tool. Return a bounded protocol error.
+                    tool_result = f"Error: invalid tool arguments ({exc.args[0]})."
+                else:
+                    if self.execution_context is None:
+                        # Keep the small registry protocol backwards
+                        # compatible for embedders that implement only
+                        # ``execute_tool``.
+                        tool_result = self.tool_registry.execute_tool(
+                            function_name,
+                            function_args,
+                        )
+                    else:
+                        tool_result = self.tool_registry.execute_tool(
+                            function_name,
+                            function_args,
+                            context=self.execution_context,
+                        )
                 full_messages.append(
                     {
                         "tool_call_id": tool_call["id"],
                         "role": "tool",
                         "name": function_name,
-                        "content": tool_result,
+                        "content": bound_tool_result(
+                            tool_result,
+                            limit=MAX_TOOL_RESULT_CHARS,
+                        ),
                     }
                 )
 
@@ -266,8 +325,40 @@ class ChatService:
         try:
             value = json.loads(str(function.get("arguments") or "{}"))
         except (TypeError, json.JSONDecodeError):
-            return {}
-        return value if isinstance(value, dict) else {}
+            raise ValueError("malformed_json") from None
+        if not isinstance(value, dict):
+            raise ValueError("object_required")
+        return value
 
     def close(self) -> None:
         self.provider.close()
+
+    @classmethod
+    def _bounded_messages(cls, messages: List[ChatMessage]) -> List[ChatMessage]:
+        """Bound every message while preserving the tool-call message order."""
+        bounded: List[ChatMessage] = []
+        for message in messages:
+            item = dict(message)
+            content = item.get("content")
+            if isinstance(content, str) and len(content) > cls.MAX_MESSAGE_CONTENT_CHARS:
+                item["content"] = bound_tool_result(
+                    content,
+                    limit=cls.MAX_MESSAGE_CONTENT_CHARS,
+                    label="message",
+                )
+            bounded.append(item)
+        return bounded
+
+    @staticmethod
+    def _json_size(value: Any) -> int:
+        try:
+            return len(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+        except (TypeError, ValueError):
+            return 2**31

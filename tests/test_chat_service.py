@@ -11,6 +11,7 @@ from core.providers.chat.base import (
 )
 from core.services.chat_experience_service import ChatCapabilityError
 from core.services.chat_service import ChatService, ChatSessionService
+from core.tool_registry import ToolExecutionContext
 
 
 class FakeChatProvider(ChatProvider):
@@ -54,12 +55,14 @@ class FakeChatProvider(ChatProvider):
 class FakeToolRegistry:
     def __init__(self):
         self.executed = []
+        self.contexts = []
 
     def get_tools_schema(self):
         return [{"type": "function", "function": {"name": "clock"}}]
 
-    def execute_tool(self, name, arguments):
+    def execute_tool(self, name, arguments, *, context=None):
         self.executed.append((name, arguments))
+        self.contexts.append(context)
         return "12:00"
 
 
@@ -149,7 +152,40 @@ class ChatServiceTests(unittest.TestCase):
         self.assertIsNone(response)
         self.assertEqual(provider.requests, [])
 
-    def test_invalid_tool_arguments_are_replaced_with_empty_object(self):
+    def test_tool_execution_context_reaches_registry(self):
+        provider = FakeChatProvider(
+            [
+                ChatCompletionResult(
+                    "",
+                    [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "clock", "arguments": "{}"},
+                    }],
+                ),
+                ChatCompletionResult("done", []),
+            ]
+        )
+        tools = FakeToolRegistry()
+        context = ToolExecutionContext(
+            session_id="session-1", character_id="shanshan"
+        )
+        service = ChatService(
+            provider=provider,
+            model="chat-model",
+            system_prompt="system",
+            messages=[],
+            tool_registry=tools,
+            execution_context=context,
+        )
+        service.run(
+            on_chunk=lambda _chunk: None,
+            on_tool_executing=lambda _name: None,
+            is_cancelled=lambda: False,
+        )
+        self.assertEqual(tools.contexts, [context])
+
+    def test_invalid_tool_arguments_are_rejected_without_empty_object_fallback(self):
         provider = FakeChatProvider(
             [
                 ChatCompletionResult(
@@ -183,7 +219,7 @@ class ChatServiceTests(unittest.TestCase):
             is_cancelled=lambda: False,
         )
 
-        self.assertEqual(tools.executed, [("clock", {})])
+        self.assertEqual(tools.executed, [])
 
     def test_unsupported_tool_capability_blocks_before_provider_request(self):
         provider = NoToolChatProvider(
@@ -205,6 +241,48 @@ class ChatServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(provider.requests, [])
+
+    def test_tool_result_is_bounded_before_next_model_request(self):
+        provider = FakeChatProvider(
+            [
+                ChatCompletionResult(
+                    "",
+                    [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "clock", "arguments": "{}"},
+                    }],
+                ),
+                ChatCompletionResult("done", []),
+            ]
+        )
+
+        class LargeToolRegistry(FakeToolRegistry):
+            def execute_tool(self, name, arguments, *, context=None):
+                return "x" * 300_000
+
+        service = ChatService(
+            provider=provider,
+            model="chat-model",
+            system_prompt="system",
+            messages=[],
+            tool_registry=LargeToolRegistry(),
+        )
+
+        self.assertEqual(
+            service.run(
+                on_chunk=lambda _chunk: None,
+                on_tool_executing=lambda _name: None,
+                is_cancelled=lambda: False,
+            ),
+            "done",
+        )
+        tool_message = provider.requests[1]["messages"][-1]
+        self.assertLessEqual(
+            len(tool_message["content"]),
+            ChatService.MAX_MESSAGE_CONTENT_CHARS,
+        )
+        self.assertIn("truncated", tool_message["content"])
 
 
 class ChatSessionServiceTests(unittest.TestCase):

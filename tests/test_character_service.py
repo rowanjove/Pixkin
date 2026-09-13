@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from core.character_package import CharacterPackageError, CharacterPackageManager
 from core.config import ConfigManager
@@ -10,6 +11,7 @@ from core.services.character_service import (
     CharacterInstallConflict,
     CharacterService,
 )
+from core.version import CAPABILITY_MILESTONE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,3 +118,54 @@ class CharacterServiceTests(unittest.TestCase):
             self.assertTrue(result.switched_to_fallback)
             self.assertEqual(result.active_package.package_id, "shanshan")
             self.assertFalse((service.root / "yeye").exists())
+
+    def test_capability_compatibility_is_checked_during_prepare(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = self._service(Path(directory))
+            package = service.inspect_archive(
+                ROOT / "character-packs" / "shanshan.zip"
+            )
+            compatible, message = service.compatibility_status(
+                package,
+                app_version="1.5.0",
+                capability_version=CAPABILITY_MILESTONE,
+            )
+
+            self.assertTrue(compatible)
+            self.assertIn("能力里程碑", message)
+
+    def test_public_app_and_capability_versions_are_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = self._service(Path(directory))
+            package = SimpleNamespace(
+                compatibility={
+                    "min_app_version": "1.5.0",
+                    "min_capability_version": "2.0.0",
+                }
+            )
+
+            self.assertEqual(
+                service.compatibility_status(
+                    package,
+                    app_version="1.5.0",
+                    capability_version="2.0.0",
+                ),
+                (True, "与当前 Pixkin 版本和能力里程碑兼容"),
+            )
+            compatible, message = service.compatibility_status(
+                package,
+                app_version="1.5.0",
+                capability_version="1.9.0",
+            )
+            self.assertFalse(compatible)
+            self.assertIn("2.0.0", message)
+
+            app_bound = SimpleNamespace(
+                compatibility={"min_app_version": "2.0.0"}
+            )
+            compatible, _ = service.compatibility_status(
+                app_bound,
+                app_version="1.5.0",
+                capability_version="2.0.0",
+            )
+            self.assertFalse(compatible)

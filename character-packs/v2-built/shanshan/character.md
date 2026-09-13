@@ -125,7 +125,8 @@ animations:
   edge_hover_bottom: *wave
   edge_exit_bottom: {<<: *jump, playback: once}
 compatibility:
-  min_app_version: 2.0.0
+  min_app_version: 1.5.0
+  min_capability_version: 2.0.0
   atlas_layout: pixkin-8x9
 rights:
   license: project-distribution

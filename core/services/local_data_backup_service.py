@@ -3,7 +3,9 @@
 import hashlib
 import json
 import os
+import re
 import shutil
+import sqlite3
 import tempfile
 import uuid
 import zipfile
@@ -29,12 +31,18 @@ class LocalDataBackupService:
         "config.json",
         "chat-history.sqlite3",
         "memories.json",
+        "memory.sqlite3",
+        "character-state.json",
     )
     DIRECTORY_TARGETS = (
         "characters",
         "pet-lab/runs",
         "profile",
+        "plugins",
+        "audit",
+        "crashes",
     )
+    _RESTORE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
     def __init__(
         self,
@@ -68,6 +76,20 @@ class LocalDataBackupService:
                 documents["chat-history.sqlite3"] = (
                     chat_copy.read_bytes()
                 )
+            memory_source = self.data_root / "memory.sqlite3"
+            if memory_source.is_file():
+                memory_copy = Path(directory) / "memory.sqlite3"
+                # Use SQLite's online backup API so a live MemoryV2
+                # connection is captured consistently (including pages not
+                # yet flushed by the application process).
+                source_connection = sqlite3.connect(memory_source)
+                target_connection = sqlite3.connect(memory_copy)
+                try:
+                    source_connection.backup(target_connection)
+                finally:
+                    target_connection.close()
+                    source_connection.close()
+                documents["memory.sqlite3"] = memory_copy.read_bytes()
         for relative_root in self.DIRECTORY_TARGETS:
             root = self.data_root / Path(relative_root)
             if not root.is_dir():
@@ -101,6 +123,10 @@ class LocalDataBackupService:
                     if info.is_dir():
                         continue
                     self._validate_member(info)
+                    if info.filename in documents:
+                        raise LocalDataBackupError(
+                            "备份包含重复文件条目"
+                        )
                     total += info.file_size
                     if total > self.MAX_TOTAL_BYTES:
                         raise LocalDataBackupError(
@@ -116,6 +142,8 @@ class LocalDataBackupService:
             manifest = json.loads(manifest_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LocalDataBackupError("备份清单无效") from exc
+        if not isinstance(manifest, dict):
+            raise LocalDataBackupError("备份清单根节点必须是对象")
         if manifest.get("schema_version") != self.SCHEMA_VERSION:
             raise LocalDataBackupError("备份版本不兼容")
         expected = manifest.get("files")
@@ -165,22 +193,33 @@ class LocalDataBackupService:
         if not self.marker_path.is_file():
             return None
         try:
-            marker = json.loads(
-                self.marker_path.read_text(encoding="utf-8")
-            )
+            marker = json.loads(self.marker_path.read_text(encoding="utf-8"))
+            if not isinstance(marker, dict):
+                raise ValueError("restore marker must be an object")
+            if marker.get("schema_version") != self.SCHEMA_VERSION:
+                raise ValueError("restore marker version is incompatible")
             stage = Path(marker["stage"]).resolve()
-        except (OSError, KeyError, json.JSONDecodeError) as exc:
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise LocalDataBackupError(
                 "待恢复标记无法读取"
             ) from exc
         staging_root = self.staging_root.resolve()
         if staging_root not in stage.parents or not stage.is_dir():
             raise LocalDataBackupError("待恢复暂存目录无效")
-        manifest = json.loads(
-            (stage / "manifest.json").read_text(encoding="utf-8")
-        )
+        try:
+            manifest = json.loads(
+                (stage / "manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LocalDataBackupError("暂存恢复清单无法读取") from exc
+        if not isinstance(manifest, dict):
+            raise LocalDataBackupError("暂存恢复清单无效")
+        if manifest.get("schema_version") != self.SCHEMA_VERSION:
+            raise LocalDataBackupError("暂存恢复清单版本不兼容")
         self._verify_staged(stage / "data", manifest)
         restore_id = str(marker.get("restore_id") or uuid.uuid4().hex)
+        if not self._RESTORE_ID_RE.fullmatch(restore_id):
+            raise LocalDataBackupError("待恢复标识无效")
         backup_root = (
             self.data_root / "backups" / f"restore-{restore_id}"
         )
@@ -226,6 +265,8 @@ class LocalDataBackupService:
         if not isinstance(files, dict):
             raise LocalDataBackupError("暂存恢复清单无效")
         for name, metadata in files.items():
+            if not isinstance(name, str) or not isinstance(metadata, dict):
+                raise LocalDataBackupError("暂存恢复清单无效")
             member = PurePosixPath(name)
             if (
                 member.is_absolute()
@@ -235,7 +276,8 @@ class LocalDataBackupService:
                 raise LocalDataBackupError("暂存恢复路径无效")
             path = root / Path(*member.parts)
             if (
-                not path.is_file()
+                path.is_symlink()
+                or not path.is_file()
                 or path.stat().st_size != metadata.get("size")
                 or self._digest(path.read_bytes())
                 != metadata.get("sha256")
@@ -258,6 +300,12 @@ class LocalDataBackupService:
             raise LocalDataBackupError("备份包含符号链接")
         if info.file_size > self.MAX_FILE_BYTES:
             raise LocalDataBackupError("备份单文件超过大小上限")
+        if (
+            info.file_size > 1024 * 1024
+            and info.compress_size > 0
+            and info.file_size / info.compress_size > 200
+        ):
+            raise LocalDataBackupError("备份压缩比异常")
 
     @classmethod
     def _allowed_name(cls, name: str) -> bool:

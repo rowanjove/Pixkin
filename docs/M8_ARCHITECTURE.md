@@ -1,6 +1,6 @@
 # M8 架构解耦实施说明
 
-状态：`completed`
+状态：`IMPLEMENTED`
 目标版本：`1.5.0`
 
 ## 依赖规则
@@ -166,8 +166,8 @@ providers / storage / generation（外部接口、持久化、工作流）
 - UI 不直接导入 OpenAI SDK、HTTP 客户端或 SQLite，也不执行角色/资料文件事务。
 - `PetLabWindow`、`SettingsWindow`、`ChatBubbleWindow`、`PetWindow` 和
   `CharacterPackageManager` 均不超过 500 条建议线。
-- 231 项测试与 20 个子测试、78.9% 分支覆盖率、PyInstaller 构建和
-  隔离用户目录冒烟全部通过。
+- 最新质量门禁为 459 项测试与 46 个子测试、74.99% 总覆盖率；本轮修复后的
+  PyInstaller 文件夹版与便携版构建并通过隔离用户目录冒烟，安装器尚未重建。
 
 ## 回滚边界
 

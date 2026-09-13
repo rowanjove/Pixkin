@@ -3,9 +3,13 @@ from typing import Any, Dict, List, Optional
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.providers.chat.base import ChatProvider, classify_chat_error
-from core.providers.chat.openai_compatible import OpenAICompatibleChatProvider
 from core.services.chat_service import ChatService
-from core.tool_registry import ToolRegistry
+from core.tool_registry import ToolExecutionContext, ToolRegistry
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionOperation,
+    PermissionResource,
+)
 
 
 class AiWorkerThread(QThread):
@@ -14,6 +18,7 @@ class AiWorkerThread(QThread):
     tool_executing = pyqtSignal(str)      # 正在执行 Tool 的通知信号
     finished_response = pyqtSignal(str)   # 对话最终完成信号
     error_occurred = pyqtSignal(str)      # 异常发生信号
+    emotion_detected = pyqtSignal(object) # 识别到情绪/动作标签信号 (PetState)
 
     def __init__(
         self,
@@ -24,6 +29,9 @@ class AiWorkerThread(QThread):
         messages: List[Dict[str, Any]],
         tool_registry: ToolRegistry,
         provider: Optional[ChatProvider] = None,
+        execution_context: ToolExecutionContext | None = None,
+        permission_service: ContextPermissionService | None = None,
+        permission_token: str | None = None,
     ):
         super().__init__()
         self.base_url = base_url or "https://api.deepseek.com/v1"
@@ -33,6 +41,11 @@ class AiWorkerThread(QThread):
         self.messages = messages
         self.tool_registry = tool_registry
         self._provider = provider
+        self._execution_context = execution_context
+        # The worker is also usable outside the desktop composition root;
+        # network access must remain default-deny in that embedding case.
+        self._permission_service = permission_service or ContextPermissionService()
+        self._permission_token = permission_token
         self._service: Optional[ChatService] = None
 
     def cancel(self):
@@ -50,16 +63,29 @@ class AiWorkerThread(QThread):
             return
 
         try:
-            provider = self._provider or OpenAICompatibleChatProvider(
-                api_key=self.api_key,
-                base_url=self.base_url,
+            decision = self._permission_service.decide(
+                PermissionResource.NETWORK,
+                PermissionOperation.WRITE,
+                resolve_ask=False,
+                consume_pending=True,
+                handoff_token=self._permission_token,
             )
+            if not decision.allowed:
+                raise PermissionError(
+                    "网络权限未允许；请在隐私与审计中授权后重试。"
+                )
+            provider = self._provider
+            if provider is None:
+                raise RuntimeError(
+                    "未注册聊天 Provider；请通过 ProviderRegistry 配置模型"
+                )
             self._service = ChatService(
                 provider=provider,
                 model=self.model,
                 system_prompt=self.system_prompt,
                 messages=self.messages,
                 tool_registry=self.tool_registry,
+                execution_context=self._execution_context,
             )
             response = self._service.run(
                 on_chunk=self.chunk_received.emit,
@@ -67,6 +93,7 @@ class AiWorkerThread(QThread):
                     f"正在使用工具：{name}"
                 ),
                 is_cancelled=self.isInterruptionRequested,
+                on_emotion=self.emotion_detected.emit,
             )
             if response is not None:
                 self.finished_response.emit(response)

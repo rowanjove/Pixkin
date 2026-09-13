@@ -152,3 +152,27 @@ class ToolAuditStoreTests(unittest.TestCase):
                 ToolAuditStore(target).events()[0].tool_name,
                 "tool_1",
             )
+
+    def test_corrupt_root_is_quarantined_and_rebuilt_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tool-audit.json"
+            path.write_bytes(b"[]")
+
+            store = ToolAuditStore(path)
+
+            self.assertEqual(store.events(), ())
+            self.assertFalse(path.exists())
+            self.assertEqual(
+                len(list(path.parent.glob("tool-audit.json.corrupt-*"))),
+                1,
+            )
+
+    def test_invalid_utf8_is_quarantined_and_rebuilt_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tool-audit.json"
+            path.write_bytes(b"\xff")
+
+            store = ToolAuditStore(path)
+
+            self.assertEqual(store.events(), ())
+            self.assertFalse(path.exists())

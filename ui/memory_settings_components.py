@@ -109,7 +109,14 @@ class MemorySettingsPanel(QWidget):
             character_id=self.character_id,
         ):
             state = "启用" if record.enabled else "停用"
-            item = QListWidgetItem(f"[{state}] {record.content}")
+            item = QListWidgetItem(
+                f"[{state} · {getattr(record, 'kind', 'profile')}] {record.content}"
+            )
+            item.setToolTip(
+                f"来源：{getattr(record, 'source_type', 'explicit')}\n"
+                f"创建：{record.created_at}\n"
+                f"最近使用：{getattr(record, 'last_used_at', '') or '尚未使用'}"
+            )
             item.setData(Qt.ItemDataRole.UserRole, record.id)
             self.memory_list.addItem(item)
             if record.id == selected_id:

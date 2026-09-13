@@ -58,6 +58,9 @@ V2_TOP_LEVEL_FIELDS = {
     "quality_tier", "preview", "persona", "behavior", "animations",
     "compatibility", "rights", "edge", "extensions", "system_prompt",
 }
+V3_TOP_LEVEL_FIELDS = V2_TOP_LEVEL_FIELDS | {
+    "identity", "renderer", "voice", "memory_policy", "capabilities",
+}
 V2_REQUIRED_FIELDS = {
     "schema_version", "id", "name", "version", "author", "description",
     "quality_tier", "persona", "behavior", "animations", "compatibility",
@@ -133,6 +136,11 @@ class CharacterPackage:
     edge: Dict[str, Any] = field(default_factory=dict)
     compatibility: Dict[str, Any] = field(default_factory=dict)
     rights: Dict[str, Any] = field(default_factory=dict)
+    renderer: Dict[str, Any] = field(default_factory=dict)
+    voice: Dict[str, Any] = field(default_factory=dict)
+    memory_policy: Dict[str, Any] = field(default_factory=dict)
+    capabilities: Dict[str, Any] = field(default_factory=dict)
+    extensions: Dict[str, Any] = field(default_factory=dict)
 
     def animation_for(self, state: str) -> Optional[AnimationSpec]:
         normalized = STATE_ALIASES.get(state, state)
@@ -495,7 +503,7 @@ class CharacterPackageManager:
                 prefix = str(PurePosixPath(md_info.filename.replace("\\", "/")).parent)
                 prefix = "" if prefix == "." else prefix.rstrip("/") + "/"
                 text = archive.read(md_info).decode("utf-8-sig")
-        except zipfile.BadZipFile as exc:
+        except (UnicodeDecodeError, zipfile.BadZipFile) as exc:
             raise CharacterPackageError("ZIP 文件已损坏或格式不正确。") from exc
 
         metadata = self._parse_frontmatter(text)
@@ -513,12 +521,20 @@ class CharacterPackageManager:
         md_path = directory / "character.md"
         if not md_path.is_file():
             raise CharacterPackageError("角色目录缺少 character.md。")
-        metadata = self._parse_frontmatter(md_path.read_text(encoding="utf-8-sig"))
+        try:
+            text = md_path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CharacterPackageError(
+                "角色目录中的 character.md 不是有效 UTF-8 文件。"
+            ) from exc
+        metadata = self._parse_frontmatter(text)
         names = {
             file.relative_to(directory).as_posix()
             for file in directory.rglob("*")
-            if file.is_file()
+            if not file.is_symlink() and file.is_file()
         }
+        if any(path.is_symlink() for path in directory.rglob("*")):
+            raise CharacterPackageError("角色目录不允许包含符号链接。")
         self._validate_metadata(metadata, names)
         self._validate_directory_images(directory, metadata)
         return self._metadata_to_package(metadata, directory)
@@ -613,6 +629,11 @@ class CharacterPackageManager:
             edge=dict(metadata.get("edge") or {}),
             compatibility=dict(metadata.get("compatibility") or {}),
             rights=dict(metadata.get("rights") or {}),
+            renderer=dict(metadata.get("renderer") or {}),
+            voice=dict(metadata.get("voice") or {}),
+            memory_policy=dict(metadata.get("memory_policy") or {}),
+            capabilities=dict(metadata.get("capabilities") or {}),
+            extensions=dict(metadata.get("extensions") or {}),
         )
 
     @staticmethod
@@ -686,18 +707,30 @@ class CharacterPackageManager:
         visit(value, 0, set())
 
     def _validate_metadata(self, metadata: dict, file_names):
+        schema_major = self._schema_major(metadata)
+        if schema_major >= 3:
+            identity = metadata.get("identity")
+            if isinstance(identity, dict):
+                metadata.setdefault("id", identity.get("id"))
+                metadata.setdefault("name", identity.get("name"))
+                metadata.setdefault("version", identity.get("version", "1.0.0"))
+                metadata.setdefault("author", identity.get("author", "未知作者"))
+                metadata.setdefault("description", identity.get("description", ""))
+            metadata.setdefault("quality_tier", "basic")
+            metadata.setdefault("compatibility", {})
+            metadata.setdefault("rights", {})
         for key in ("id", "name", "animations"):
             if not metadata.get(key):
                 raise CharacterPackageError(f"character.md 缺少必填字段：{key}")
         self._validated_id(str(metadata["id"]))
-        schema_major = self._schema_major(metadata)
-        if schema_major not in {1, 2}:
+        if schema_major not in {1, 2, 3}:
             raise CharacterPackageError(
                 f"不支持的角色包 schema_version："
                 f"{metadata.get('schema_version')}"
             )
         if schema_major >= 2:
-            unknown = sorted(set(metadata) - V2_TOP_LEVEL_FIELDS)
+            allowed_fields = V3_TOP_LEVEL_FIELDS if schema_major >= 3 else V2_TOP_LEVEL_FIELDS
+            unknown = sorted(set(metadata) - allowed_fields)
             if unknown:
                 raise CharacterPackageError(
                     f"不支持的顶层字段：{', '.join(unknown)}"
@@ -710,6 +743,10 @@ class CharacterPackageManager:
             for key in ("persona", "behavior", "compatibility", "rights"):
                 if not isinstance(metadata.get(key), dict):
                     raise CharacterPackageError(f"{key} 必须是对象。")
+            if schema_major >= 3:
+                for key in ("renderer", "voice", "memory_policy", "capabilities"):
+                    if key in metadata and not isinstance(metadata.get(key), dict):
+                        raise CharacterPackageError(f"{key} 必须是对象。")
             initiative = metadata["persona"].get("initiative", {})
             if initiative and not isinstance(initiative, dict):
                 raise CharacterPackageError("persona.initiative 必须是对象。")
@@ -1027,6 +1064,8 @@ class CharacterPackageManager:
         sizes = {}
         for item in self._declared_image_files(metadata):
             path = directory / Path(*self._safe_relative(item).parts)
+            if path.is_symlink():
+                raise CharacterPackageError("角色目录不允许通过符号链接读取资源。")
             sizes[item] = self._read_image_size(path=path)
         self._validate_total_image_pixels(sizes)
         self._validate_v2_geometry(metadata, sizes)

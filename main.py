@@ -5,7 +5,7 @@ import traceback
 import time
 from datetime import datetime, timezone
 
-from PyQt6.QtCore import Qt, QLockFile, QTimer
+from PyQt6.QtCore import Qt, QLockFile, QThread, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QMenu, QMessageBox, QSystemTrayIcon
 )
@@ -27,7 +27,7 @@ from core.live_monitor import LiveMonitorThread
 from core.providers.live import ADAPTERS, LiveProviderRouter
 from core.paths import resource_path, user_data_dir
 from core.pet_animator import PetState
-from core.privacy import privacy_scope_fingerprint
+from core.privacy import model_data_scope, privacy_scope_fingerprint
 from core.secrets import SecretStore
 from core.services.chat_service import (
     ChatSessionService,
@@ -53,6 +53,8 @@ from core.services.local_data_backup_service import (
     LocalDataBackupService,
 )
 from core.services.memory_service import MemoryService, MemoryStoreError
+from core.services.memory_v2_service import MemoryV2Service
+from core.services.character_state_service import CharacterStateService
 from core.services.global_hotkey_service import GlobalHotkeyManager
 from core.services.voice_input_service import (
     VoiceEndpoint,
@@ -73,10 +75,34 @@ from core.services.update_service import (
     installed_manifest_urls,
 )
 from core.storage.migrations import StorageMigrationError
-from core.tool_registry import ToolRegistry
+from core.tool_registry import ToolExecutionContext, ToolRegistry
 from core.structured_logging import log_event
 from core.version import VERSION
 from core.windows_integration import set_start_with_windows
+from core.services.context_sensor_service import ContextSensorService
+from core.services.perception_context import PerceptionContextProjector
+from core.services.proactive_companion_service import (
+    ProactiveCompanionService,
+    ProactivePolicyConfig,
+)
+from core.services.voice_output_service import VoiceOutputService
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionOperation,
+    PermissionResource,
+    PermissionState,
+)
+from core.providers.catalog import build_builtin_provider_catalog
+from core.speech import SpeechInterruptionController, SpeechState
+from core.plugins import PluginHost
+from core.runtime import (
+    ActionDispatcher,
+    EventBus,
+    EventEnvelope,
+    PixkinKernel,
+    ServiceContainer,
+    StartupCoordinator,
+)
 from ui.onboarding_window import FirstRunWindow
 from ui.chat_database_recovery_dialog import ChatDatabaseRecoveryDialog
 from ui.history_window import HistoryWindow
@@ -90,6 +116,39 @@ from ui.voice_input_components import (
     PushToTalkRecorder,
     VoiceTranscriptionWorker,
 )
+from ui.voice_output_components import play_audio_bytes
+
+
+class TtsPlaybackWorker(QThread):
+    """异步执行 TTS 合成并播放音频，不阻塞 Qt 主事件循环。"""
+
+    def __init__(self, service: VoiceOutputService, text: str):
+        super().__init__()
+        self.service = service
+        self.text = text
+
+    def run(self):
+        try:
+            audio = self.service.synthesize_sentence(self.text)
+            if audio and not self.isInterruptionRequested():
+                play_audio_bytes(audio)
+        except Exception as exc:
+            logging.getLogger("desktop_pet.tts").debug(
+                "TTS 播放失败: %s", exc
+            )
+
+    def stop_playback(self, *, cancel_request: bool = False) -> None:
+        self.requestInterruption()
+        if cancel_request:
+            cancel = getattr(self.service, "cancel", None)
+            if callable(cancel):
+                cancel()
+        try:
+            import winsound
+
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
 
 
 LOGGER = logging.getLogger("desktop_pet.main")
@@ -124,6 +183,7 @@ class DesktopPetApp:
 
     def __init__(self):
         self._startup_started = time.perf_counter()
+        self.startup_coordinator = StartupCoordinator(())
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
         self.app.setApplicationName("Pixkin")
@@ -154,6 +214,7 @@ class DesktopPetApp:
                 "请在系统托盘中找到正在运行的 Pixkin。"
             )
             return
+        self.startup_coordinator.mark("single_instance")
         self.local_data_backup_service = LocalDataBackupService(
             user_data_dir()
         )
@@ -177,6 +238,7 @@ class DesktopPetApp:
                 "恢复前数据保存在：\n"
                 f"{restore_backup}",
             )
+        self.startup_coordinator.mark("pending_restore")
 
         try:
             self.config_mgr = ConfigManager()
@@ -189,6 +251,26 @@ class DesktopPetApp:
             )
             self._instance_lock.unlock()
             return
+        self.startup_coordinator.mark("config_migration")
+        self.context_permission_service = ContextPermissionService()
+        self._load_context_permissions()
+        self.event_bus = EventBus()
+        self._live_event_subscription = self.event_bus.subscribe(
+            "stream.started",
+            self._on_stream_started_event,
+        )
+        self.action_dispatcher = ActionDispatcher(
+            self.context_permission_service
+        )
+        self.service_container = ServiceContainer()
+        self.plugin_host = PluginHost(
+            user_data_dir() / "plugins",
+            permission_service=self.context_permission_service,
+        )
+        self.discovered_plugins = self.plugin_host.discover()
+        self.startup_coordinator.mark("plugin_scan")
+        self.provider_catalog = build_builtin_provider_catalog()
+        self.startup_coordinator.mark("provider_registration")
         try:
             self.app.styleHints().colorSchemeChanged.connect(
                 self._on_system_theme_changed
@@ -244,6 +326,7 @@ class DesktopPetApp:
             )
             self._instance_lock.unlock()
             return
+        self.startup_coordinator.mark("character_load")
 
         self.tool_permission_bridge = ToolPermissionBridge()
         try:
@@ -310,8 +393,9 @@ class DesktopPetApp:
         self.local_data_backup_service.chat_store = self.chat_store
         self.chat_session = ChatSessionService(self.chat_store)
         try:
-            self.memory_service = MemoryService(
-                user_data_dir() / "memories.json"
+            self.memory_service = MemoryV2Service(
+                user_data_dir() / "memory.sqlite3",
+                legacy_json_path=user_data_dir() / "memories.json",
             )
         except MemoryStoreError as exc:
             QMessageBox.critical(
@@ -321,6 +405,7 @@ class DesktopPetApp:
             )
             self._instance_lock.unlock()
             return
+        self.startup_coordinator.mark("database_migration")
         chat_session = getattr(self, "chat_session", None)
         if chat_session is not None:
             chat_session.set_retention(
@@ -333,11 +418,28 @@ class DesktopPetApp:
                 )
             )
         self.pet_window = PetWindow(self.config_mgr, active_package)
+        self.context_permission_service.set_ask_callback(
+            self._ask_context_permission
+        )
         self.pet_window.chat_window.set_tool_schemas(
             self.tool_registry.get_tools_schema()
         )
         self.active_character_id = active_package.package_id
         self.active_character_name = active_package.name
+        try:
+            self.character_state_service = CharacterStateService(
+                user_data_dir() / "character-state.json"
+            )
+            self.character_state_service.transition(
+                self.active_character_id,
+                "startup",
+            )
+        except (OSError, ValueError) as exc:
+            LOGGER.warning(
+                "角色状态初始化失败（%s），本次运行不持久化状态",
+                type(exc).__name__,
+            )
+            self.character_state_service = None
         snapshot = self.chat_session.activate_character(
             active_package.package_id,
             active_package.name,
@@ -345,10 +447,15 @@ class DesktopPetApp:
         self._apply_chat_snapshot(snapshot)
         self.ai_worker = None
         self._ai_session_id = None
+        self._ai_permission_token = None
         self._ai_used_memories = []
         self._ai_started_at = 0.0
         self._ai_input_text = ""
         self._voice_worker = None
+        self._speech_controller = SpeechInterruptionController(
+            on_cancel_tts=self._interrupt_tts
+        )
+        self._speech_controller.subscribe(self._on_speech_state)
         self._last_user_text = ""
         self._history_window = None
         self.live_monitor = None
@@ -395,7 +502,18 @@ class DesktopPetApp:
         self._setup_global_hotkeys()
         self._refresh_microphone_status()
         self._setup_live_monitor()
+        self._voice_output_service = None
+        self._tts_playback_worker = None
+        self._tts_playback_workers = []
+        self._retired_voice_output_services = []
+        self._setup_voice_output()
+        self._setup_proactive_companion()
+        self._register_runtime_services()
+        self.kernel = PixkinKernel(self.service_container)
+        self.kernel.start()
+        self.startup_coordinator.mark("service_start")
         self.pet_window.show()
+        self.startup_coordinator.mark("ui_start")
         self.ready = True
         log_event(
             LOGGER,
@@ -477,24 +595,42 @@ class DesktopPetApp:
     ):
         if self._quitting or self.update_service is None:
             return
-        checked_at = datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        )
-        self.config_mgr.set(
-            "app", "last_update_check", checked_at
-        )
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is None:
+            LOGGER.info("自动更新检查跳过：权限服务不可用")
+            return
+        permission_token = ContextPermissionService.new_handoff_token()
+        if not permissions.decide(
+            PermissionResource.NETWORK,
+            PermissionOperation.READ,
+            handoff_token=permission_token,
+        ).allowed:
+            permissions.clear_pending(
+                PermissionResource.NETWORK,
+                PermissionOperation.READ,
+                handoff_token=permission_token,
+            )
+            LOGGER.info("自动更新检查跳过：网络权限未允许")
+            return
         worker = UpdateCheckWorker(
             self.update_service,
             manifest_url,
             channel,
+            permission_service=permissions,
+            permission_token=permission_token,
         )
         worker.completed.connect(self._automatic_update_available)
+        worker.completed.connect(self._mark_automatic_update_checked)
         worker.failed.connect(
             lambda message: LOGGER.info(
                 "自动更新检查未完成：%s", message
             )
         )
-        worker.finished.connect(self._clear_update_check_worker)
+        worker.finished.connect(
+            lambda token=permission_token: self._finish_automatic_update_check(
+                token
+            )
+        )
         worker.finished.connect(self._maybe_finish_quit)
         self._update_check_worker = worker
         worker.start()
@@ -507,6 +643,21 @@ class DesktopPetApp:
             QSystemTrayIcon.MessageIcon.Information,
             8000,
         )
+
+    def _mark_automatic_update_checked(self, _release) -> None:
+        """Record the daily gate only after fetch and signature verification."""
+        checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.config_mgr.set("app", "last_update_check", checked_at)
+
+    def _finish_automatic_update_check(self, permission_token: str) -> None:
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is not None:
+            permissions.clear_pending(
+                PermissionResource.NETWORK,
+                PermissionOperation.READ,
+                handoff_token=permission_token,
+            )
+        self._clear_update_check_worker()
 
     def _clear_update_check_worker(self):
         self._update_check_worker = None
@@ -847,8 +998,321 @@ class DesktopPetApp:
             self.pet_window.chat_window.apply_theme()
         self._apply_tray_theme()
 
+    def _setup_voice_output(self):
+        self._retire_voice_output_service()
+        cfg = self.config_mgr.get("voice_output", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        enabled = bool(cfg.get("enabled", False))
+        provider_name = str(cfg.get("provider", "windows_sapi"))
+        voice = str(cfg.get("voice", ""))
+        speed = float(cfg.get("speed", 1.0))
+        base_url = str(cfg.get("base_url", "https://api.openai.com/v1"))
+        model = str(cfg.get("model", "tts-1"))
+
+        if not hasattr(self, "provider_catalog"):
+            self.provider_catalog = build_builtin_provider_catalog()
+        tts_registry = self.provider_catalog.get("tts")
+        if tts_registry is None:
+            raise RuntimeError("TTS provider registry is unavailable")
+        if provider_name == "windows_sapi":
+            provider = tts_registry.create("windows_sapi")
+        else:
+            permissions = getattr(self, "context_permission_service", None)
+            if permissions is None:
+                LOGGER.error("网络权限服务未初始化，禁用云端 TTS")
+                enabled = False
+            else:
+                network_decision = permissions.decide(
+                    PermissionResource.NETWORK,
+                    PermissionOperation.WRITE,
+                )
+                if not network_decision.allowed:
+                    LOGGER.info("云端 TTS 未启用：网络权限未允许")
+                    enabled = False
+            api_key = self._voice_api_key()
+            provider = tts_registry.create(
+                "openai_compatible",
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+            )
+
+        self._voice_output_service = VoiceOutputService(
+            provider,
+            voice=voice if voice else None,
+            speed=speed,
+            enabled=enabled,
+            permission_service=getattr(
+                self, "context_permission_service", None
+            ),
+        )
+
+    def _retire_voice_output_service(self) -> None:
+        """Retire a service only after its worker has stopped using it."""
+        service = getattr(self, "_voice_output_service", None)
+        if service is None:
+            return
+        self._voice_output_service = None
+        workers = [
+            worker
+            for worker in getattr(self, "_tts_playback_workers", [])
+            if worker.isRunning() and worker.service is service
+        ]
+        if workers:
+            for worker in workers:
+                stop_playback = getattr(worker, "stop_playback", None)
+                if callable(stop_playback):
+                    stop_playback(cancel_request=True)
+            self._retired_voice_output_services = list(
+                getattr(self, "_retired_voice_output_services", [])
+            )
+            self._retired_voice_output_services.append(service)
+            return
+        worker = getattr(self, "_tts_playback_worker", None)
+        if worker is not None and worker.isRunning():
+            stop_playback = getattr(worker, "stop_playback", None)
+            if callable(stop_playback):
+                stop_playback(cancel_request=True)
+            self._retired_voice_output_services = list(
+                getattr(self, "_retired_voice_output_services", [])
+            )
+            self._retired_voice_output_services.append(service)
+            return
+        try:
+            service.close()
+        except Exception:
+            pass
+
+    def _close_retired_voice_output_services(self) -> None:
+        workers = getattr(self, "_tts_playback_workers", [])
+        active_services = {
+            worker.service for worker in workers if worker.isRunning()
+        }
+        services = list(getattr(self, "_retired_voice_output_services", []))
+        self._retired_voice_output_services = [
+            service for service in services if service in active_services
+        ]
+        for service in services:
+            if service in active_services:
+                continue
+            try:
+                service.close()
+            except Exception:
+                pass
+
+    def _setup_proactive_companion(self):
+        if not hasattr(self, "event_bus"):
+            self.event_bus = EventBus()
+        if not hasattr(self, "context_permission_service"):
+            self.context_permission_service = ContextPermissionService()
+        proactive_cfg = self.config_mgr.get("proactive", {})
+        if not isinstance(proactive_cfg, dict):
+            proactive_cfg = {}
+        policy = ProactivePolicyConfig(
+            enabled=bool(proactive_cfg.get("enabled", False)),
+            quiet_fullscreen=bool(proactive_cfg.get("quiet_fullscreen", True)),
+            work_stretch_reminder=bool(
+                proactive_cfg.get("work_stretch_reminder", True)
+            ),
+            work_stretch_interval_minutes=int(
+                proactive_cfg.get("work_stretch_interval_minutes", 90)
+            ),
+            sleep_guard=bool(proactive_cfg.get("sleep_guard", False)),
+            sleep_guard_hour=int(proactive_cfg.get("sleep_guard_hour", 23)),
+            sleep_guard_minute=int(
+                proactive_cfg.get("sleep_guard_minute", 30)
+            ),
+            min_prompt_interval_seconds=int(
+                proactive_cfg.get("min_prompt_interval_seconds", 3600)
+            ),
+        )
+        self.context_sensor = ContextSensorService(
+            permission_service=getattr(
+                self,
+                "context_permission_service",
+                None,
+            )
+        )
+        self.perception_projector = PerceptionContextProjector()
+        self.proactive_service = ProactiveCompanionService(policy)
+        if not hasattr(self, "_proactive_event_subscription"):
+            self._proactive_event_subscription = self.event_bus.subscribe(
+                "companion.proactive",
+                self._on_proactive_event,
+            )
+        if not hasattr(self, "_proactive_timer"):
+            app = getattr(self, "app", None)
+            self._proactive_timer = QTimer(app) if app is not None else QTimer()
+            self._proactive_timer.timeout.connect(self._check_proactive_nudge)
+        if policy.enabled:
+            self._proactive_timer.start(30000)
+        else:
+            self._proactive_timer.stop()
+
+    def _register_runtime_services(self):
+        """Register constructed services at the composition root.
+
+        Existing windows keep their compatibility attributes during the
+        migration. New controllers receive this container explicitly instead
+        of constructing providers or storage on demand.
+        """
+        services = {
+            "config": self.config_mgr,
+            "character": self.character_service,
+            "chat_store": self.chat_store,
+            "chat_session": self.chat_session,
+            "memory": self.memory_service,
+            "character_state": self.character_state_service,
+            "tools": self.tool_registry,
+            "permissions": self.context_permission_service,
+            "events": self.event_bus,
+            "actions": self.action_dispatcher,
+            "speech": getattr(self, "_speech_controller", None),
+            "plugins": self.plugin_host,
+            "providers": self.provider_catalog,
+            "updates": self.update_service,
+        }
+        for name, service in services.items():
+            if service is not None:
+                self.service_container.register(name, service, replace=True)
+
+    def _on_proactive_event(self, event: EventEnvelope):
+        """Render a policy-approved proactive event in the Qt thread."""
+        if event.type != "companion.proactive":
+            return
+        pet_win = getattr(self, "pet_window", None)
+        if pet_win is None:
+            return
+        payload = event.payload
+        try:
+            target_state = PetState(str(payload.get("target_state")))
+        except ValueError:
+            return
+        pet_win.animator.request_state(
+            target_state,
+            duration_ms=3000,
+            restore=True,
+            complete_current=True,
+        )
+        state_service = getattr(self, "character_state_service", None)
+        if state_service is not None:
+            state_service.transition(
+                getattr(self, "active_character_id", "default"),
+                str(payload.get("kind") or "idle_tick"),
+            )
+        if getattr(self, "tray", None) is not None:
+            self.tray.showMessage(
+                "Pixkin 贴心关怀",
+                str(payload.get("message") or ""),
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+
+    def _load_context_permissions(self):
+        """Load persisted context grants without ever granting by default."""
+        if not hasattr(self, "context_permission_service"):
+            self.context_permission_service = ContextPermissionService()
+        values = self.config_mgr.get(
+            "privacy",
+            "context_permissions",
+            {},
+        )
+        if not isinstance(values, dict):
+            return
+        for resource in PermissionResource:
+            raw = values.get(resource.value)
+            try:
+                state = PermissionState(raw)
+            except (TypeError, ValueError):
+                continue
+            if state in {
+                PermissionState.ALLOW_ALWAYS,
+                PermissionState.DENY,
+                PermissionState.ASK,
+            }:
+                self.context_permission_service.set_state(resource, state)
+
+    def _ask_context_permission(self, resource, operation) -> bool:
+        """Ask once for an observation/action that is configured as ASK."""
+        labels = {
+            PermissionResource.WINDOW_METADATA: "前台窗口与进程名",
+            PermissionResource.SYSTEM_STATE: "系统空闲时间",
+            PermissionResource.CLIPBOARD: "剪贴板文本",
+            PermissionResource.SCREEN: "屏幕截图",
+            PermissionResource.PLUGIN: "第三方插件进程",
+            PermissionResource.MCP: "MCP 外部工具",
+            PermissionResource.MICROPHONE: "麦克风录音",
+            PermissionResource.CAMERA: "摄像头",
+            PermissionResource.FILESYSTEM: "文件访问",
+            PermissionResource.NETWORK: "网络访问",
+            PermissionResource.EXTERNAL_ACTION: "外部动作",
+        }
+        label = labels.get(resource, resource.value)
+        answer = QMessageBox.question(
+            getattr(self, "pet_window", None),
+            "Pixkin 请求权限",
+            f"允许 Pixkin 本次{operation.value}读取或使用“{label}”吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _check_proactive_nudge(self):
+        if not getattr(self, "ready", False) or getattr(self, "_quitting", False):
+            return
+        if getattr(self, "ai_worker", None) and self.ai_worker.isRunning():
+            return
+        pet_win = getattr(self, "pet_window", None)
+        if pet_win is None or getattr(pet_win, "_is_dragging", False):
+            return
+
+        sensor = getattr(self, "context_sensor", None)
+        proactive = getattr(self, "proactive_service", None)
+        if sensor is None or proactive is None:
+            return
+
+        # Background nudges must never open permission dialogs or capture
+        # one-shot sensitive context.
+        snapshot = sensor.poll(resolve_ask=False)
+        self._last_context_snapshot = snapshot
+        event = proactive.evaluate(snapshot)
+        if event is not None:
+            self.event_bus.publish(
+                EventEnvelope(
+                    type="companion.proactive",
+                    source="proactive_companion",
+                    payload={
+                        "kind": event.kind,
+                        "target_state": event.target_state.value,
+                        "message": event.message,
+                    },
+                    priority=20,
+                    sensitivity="private",
+                )
+            )
+
     def _setup_live_monitor(self):
         if self._quitting:
+            return
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is None:
+            self.tray.setToolTip("Pixkin · 开播监听未启用（权限服务不可用）")
+            return
+        if permissions.state(PermissionResource.NETWORK) is PermissionState.ASK:
+            # The monitor is long-lived; a one-shot ASK approval must not be
+            # stretched into an unbounded background network grant.  Users
+            # can explicitly choose session/always access in Privacy Center.
+            self.tray.setToolTip(
+                "Pixkin · 开播监听未启用（需要会话级网络授权）"
+            )
+            return
+        network_decision = permissions.decide(
+            PermissionResource.NETWORK,
+            PermissionOperation.READ,
+        )
+        if not network_decision.allowed:
+            self.tray.setToolTip("Pixkin · 开播监听未启用（网络权限未允许）")
             return
         monitor_config = self.config_mgr.get("live_monitor", {})
         rooms = monitor_config.get("rooms", [])
@@ -1032,6 +1496,31 @@ class DesktopPetApp:
     def _on_anchor_live_started(
         self, platform: str, anchor_name: str, title: str
     ):
+        self.event_bus.publish(
+            EventEnvelope(
+                type="stream.started",
+                source=f"{platform}_trigger",
+                payload={
+                    "platform": platform,
+                    "anchor_name": anchor_name,
+                    "title": title,
+                },
+                priority=40,
+                sensitivity="normal",
+            )
+        )
+
+    def _on_stream_started_event(self, event: EventEnvelope):
+        payload = event.payload
+        self._render_anchor_live_started(
+            str(payload.get("platform") or ""),
+            str(payload.get("anchor_name") or ""),
+            str(payload.get("title") or ""),
+        )
+
+    def _render_anchor_live_started(
+        self, platform: str, anchor_name: str, title: str
+    ):
         self.pet_window.play_contextual_alert(
             PetState.CELEBRATE_LIVE,
             duration_ms=3200,
@@ -1054,17 +1543,84 @@ class DesktopPetApp:
             6000,
         )
 
+    def _network_permission_allowed(self, *, handoff_token: str | None = None) -> bool:
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is None:
+            LOGGER.error("网络权限服务未初始化，拒绝发送模型请求")
+            return False
+        network_decision = permissions.decide(
+            PermissionResource.NETWORK,
+            PermissionOperation.WRITE,
+            handoff_token=handoff_token,
+        )
+        if network_decision.allowed:
+            return True
+        self.pet_window.chat_window.append_message(
+            "system",
+            "网络权限未允许，本条消息没有发送到模型接口。"
+            "请在“隐私与审计”中授权网络访问后重试。",
+        )
+        return False
+
+    def _clear_pending_network_permission(self, token: str | None = None) -> None:
+        """Discard an ASK approval when its operation will not start/finish."""
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is not None:
+            permissions.clear_pending(
+                PermissionResource.NETWORK,
+                PermissionOperation.WRITE,
+                handoff_token=token,
+            )
+
     def _on_user_send_message(self, user_text: str):
         if self.ai_worker and self.ai_worker.isRunning():
             return
-        if not self._ensure_model_privacy_notice():
+        clean_user_text = str(user_text or "")
+        permission_token = ContextPermissionService.new_handoff_token()
+        if not self._network_permission_allowed(handoff_token=permission_token):
             return
-        self._store_message("user", user_text)
-        self._last_user_text = user_text
+        # Resolve context permissions and take the snapshot before the model
+        # consent dialog.  The consent scope must describe the data that this
+        # very request can actually include.
+        sensor = getattr(self, "context_sensor", None)
+        if sensor is not None:
+            try:
+                self._last_context_snapshot = sensor.poll()
+            except Exception:
+                LOGGER.debug("上下文采样失败", exc_info=True)
+        if not self._ensure_model_privacy_notice(clean_user_text):
+            self._clear_pending_network_permission(permission_token)
+            self._last_context_snapshot = None
+            return
+        state_service = getattr(self, "character_state_service", None)
+        if state_service is not None:
+            state_service.transition(
+                getattr(self, "active_character_id", "default"),
+                "user_interaction",
+            )
+        self._store_message("user", clean_user_text)
+        self._last_user_text = clean_user_text
         self.pet_window.chat_window.set_retry_available(False)
-        self._start_ai_response()
+        self._start_ai_response(
+            network_authorized=True,
+            permission_token=permission_token,
+        )
 
-    def _start_ai_response(self):
+    def _start_ai_response(
+        self,
+        *,
+        network_authorized: bool = False,
+        permission_token: str | None = None,
+    ):
+        # The GUI send/retry path resolves ASK once before entering this
+        # method. Direct callers retain the defensive permission check.
+        if not network_authorized:
+            permission_token = ContextPermissionService.new_handoff_token()
+            if not self._network_permission_allowed(
+                handoff_token=permission_token
+            ):
+                return
+        self._ai_permission_token = permission_token
         self.pet_window.animator.set_state(PetState.LISTENING)
         self.pet_window.chat_window.set_busy(True)
         self.pet_window.chat_window.start_assistant_message()
@@ -1085,6 +1641,10 @@ class DesktopPetApp:
         prompt += MemoryService.prompt_fragment(
             self._ai_used_memories
         )
+        prompt += getattr(self, "perception_projector", PerceptionContextProjector()).prompt_fragment(
+            getattr(self, "_last_context_snapshot", None),
+            query=getattr(self, "_last_user_text", ""),
+        )
         prompt += preset_prompt(
             str(
                 self.config_mgr.get(
@@ -1098,26 +1658,55 @@ class DesktopPetApp:
             str(message.get("content") or "")
             for message in context
         )
+        chat_provider = None
+        chat_api_key = self._chat_api_key()
+        chat_registry = getattr(self, "provider_catalog", {}).get("chat")
+        if chat_api_key and chat_registry is not None:
+            chat_provider = chat_registry.create(
+                "openai_compatible",
+                api_key=chat_api_key,
+                base_url=self.config_mgr.get("api", "base_url"),
+            )
         self.ai_worker = AiWorkerThread(
             base_url=self.config_mgr.get("api", "base_url"),
-            api_key=self._chat_api_key(),
+            api_key=chat_api_key,
             model=self.config_mgr.get("api", "model"),
             system_prompt=prompt,
             messages=context,
             tool_registry=self.tool_registry,
+            provider=chat_provider,
+            execution_context=ToolExecutionContext(
+                session_id=self.chat_session.session_id,
+                character_id=getattr(self, "active_character_id", ""),
+            ),
+            permission_service=getattr(
+                self, "context_permission_service", None
+            ),
+            permission_token=permission_token,
         )
         self._ai_session_id = self.chat_session.session_id
         self.ai_worker.chunk_received.connect(self._on_ai_chunk)
         self.ai_worker.tool_executing.connect(self._on_tool_executing)
         self.ai_worker.finished_response.connect(self._on_ai_finished)
         self.ai_worker.error_occurred.connect(self._on_ai_error)
+        self.ai_worker.emotion_detected.connect(self._on_ai_emotion)
         worker = self.ai_worker
         worker.finished.connect(
             lambda finished_worker=worker: self._cleanup_ai_worker(
                 finished_worker
             )
         )
-        self.ai_worker.start()
+        try:
+            self.ai_worker.start()
+        except Exception as exc:
+            self._clear_pending_network_permission(
+                getattr(self, "_ai_permission_token", None)
+            )
+            self.ai_worker = None
+            self._on_ai_error(
+                f"大模型后台任务启动失败（{type(exc).__name__}）。请重试。"
+            )
+            return
         QTimer.singleShot(
             450,
             lambda expected_worker=worker: self._show_thinking(
@@ -1131,9 +1720,14 @@ class DesktopPetApp:
         if not getattr(self, "_last_user_text", ""):
             return
         self.pet_window.chat_window.set_retry_available(False)
+        # ``_start_ai_response`` performs the single GUI-thread permission
+        # check for retries; keeping it here avoids a duplicate ASK prompt.
         self._start_ai_response()
 
     def _stop_ai_generation(self):
+        self._clear_pending_network_permission(
+            getattr(self, "_ai_permission_token", None)
+        )
         worker = getattr(self, "ai_worker", None)
         if worker is None or not worker.isRunning():
             return
@@ -1256,6 +1850,25 @@ class DesktopPetApp:
         if not self._ensure_voice_privacy_notice():
             self._refresh_microphone_status()
             return
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is None:
+            self.pet_window.chat_window.set_microphone_status(
+                "麦克风权限服务不可用 · 请重启 Pixkin",
+                enabled=True,
+            )
+            return
+        decision = permissions.decide(
+            PermissionResource.MICROPHONE,
+        )
+        if not decision.allowed:
+            self.pet_window.chat_window.set_microphone_status(
+                "麦克风权限未允许 · 请在隐私与审计中授权",
+                enabled=True,
+            )
+            return
+        speech = getattr(self, "_speech_controller", None)
+        if speech is not None:
+            speech.begin_listening()
         self.voice_recorder.start()
 
     def _finish_voice_capture(self):
@@ -1273,6 +1886,26 @@ class DesktopPetApp:
         )
 
     def _transcribe_voice(self, wav_bytes: bytes):
+        speech = getattr(self, "_speech_controller", None)
+        if speech is not None:
+            speech.begin_thinking()
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is None:
+            if speech is not None:
+                speech.finish()
+            self._on_voice_error("网络权限服务不可用 · 请重启 Pixkin")
+            return
+        permission_token = ContextPermissionService.new_handoff_token()
+        network_decision = permissions.decide(
+            PermissionResource.NETWORK,
+            PermissionOperation.WRITE,
+            handoff_token=permission_token,
+        )
+        if not network_decision.allowed:
+            if speech is not None:
+                speech.finish()
+            self._on_voice_error("网络权限未允许 · 请在隐私与审计中授权")
+            return
         endpoint = VoiceEndpoint(
             str(
                 self.config_mgr.get(
@@ -1286,7 +1919,11 @@ class DesktopPetApp:
             ),
         )
         worker = VoiceTranscriptionWorker(
-            VoiceTranscriptionService(endpoint),
+            VoiceTranscriptionService(
+                endpoint,
+                permission_service=permissions,
+                permission_token=permission_token,
+            ),
             wav_bytes,
             self._voice_api_key(),
             parent=self.app,
@@ -1301,6 +1938,9 @@ class DesktopPetApp:
         worker.start()
 
     def _on_voice_text(self, text: str):
+        speech = getattr(self, "_speech_controller", None)
+        if speech is not None:
+            speech.finish()
         self.pet_window.chat_window.insert_voice_text(text)
         self.pet_window.chat_window.set_microphone_status(
             "转写完成 · 请确认输入框内容后发送"
@@ -1309,6 +1949,33 @@ class DesktopPetApp:
     def _clear_voice_worker(self, expected):
         if getattr(self, "_voice_worker", None) is expected:
             self._voice_worker = None
+
+    def _interrupt_tts(self):
+        workers = list(getattr(self, "_tts_playback_workers", []))
+        if not workers:
+            worker = getattr(self, "_tts_playback_worker", None)
+            if worker is not None:
+                workers = [worker]
+        for worker in workers:
+            if worker.isRunning():
+                worker.stop_playback()
+
+    def _on_speech_state(self, state: SpeechState):
+        """Keep renderer state aligned with the provider-neutral speech FSM."""
+        pet_window = getattr(self, "pet_window", None)
+        if pet_window is None:
+            return
+        mapping = {
+            SpeechState.IDLE: PetState.IDLE,
+            SpeechState.LISTENING: PetState.LISTENING,
+            SpeechState.THINKING: PetState.THINKING,
+            SpeechState.TALKING: PetState.TALKING,
+            SpeechState.INTERRUPTED: PetState.LISTENING,
+        }
+        pet_window.animator.request_state(
+            mapping[state],
+            complete_current=True,
+        )
         if getattr(self, "_quitting", False):
             self._maybe_finish_quit()
 
@@ -1372,7 +2039,44 @@ class DesktopPetApp:
                 5000,
             )
 
-    def _ensure_model_privacy_notice(self) -> bool:
+    def _model_privacy_data_scope(self) -> str:
+        permissions = getattr(self, "context_permission_service", None)
+        states = {}
+        if permissions is not None:
+            for resource in (
+                PermissionResource.WINDOW_METADATA,
+                PermissionResource.SYSTEM_STATE,
+                PermissionResource.CLIPBOARD,
+            ):
+                try:
+                    states[resource.value] = permissions.state(resource).value
+                except (AttributeError, TypeError, ValueError):
+                    continue
+        return model_data_scope(states)
+
+    def _model_privacy_context_labels(self) -> list[str]:
+        permissions = getattr(self, "context_permission_service", None)
+        if permissions is None:
+            return []
+        labels = (
+            (PermissionResource.WINDOW_METADATA, "前台窗口与进程名"),
+            (PermissionResource.SYSTEM_STATE, "系统空闲时间"),
+            (PermissionResource.CLIPBOARD, "剪贴板文本或选中文本"),
+        )
+        result = []
+        for resource, label in labels:
+            try:
+                state = permissions.state(resource)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if state in {
+                PermissionState.ALLOW_SESSION,
+                PermissionState.ALLOW_ALWAYS,
+            }:
+                result.append(label)
+        return result
+
+    def _ensure_model_privacy_notice(self, _user_text: str = "") -> bool:
         if not getattr(self, "ready", False):
             return True
         endpoint = str(
@@ -1384,9 +2088,7 @@ class DesktopPetApp:
         fingerprint = privacy_scope_fingerprint(
             endpoint=endpoint,
             model=model,
-            data_scope=(
-                "system_prompt_user_message_recent_history_and_memories"
-            ),
+            data_scope=self._model_privacy_data_scope(),
         )
         acknowledged = bool(
             self.config_mgr.get(
@@ -1405,12 +2107,22 @@ class DesktopPetApp:
         )
         if acknowledged and stored_fingerprint == fingerprint:
             return True
+        context_labels = self._model_privacy_context_labels()
+        context_notice = (
+            "当前已授权的桌面上下文类别："
+            + "、".join(context_labels)
+            + "。\n\n"
+            if context_labels
+            else "当前未授权桌面上下文。\n\n"
+        )
         answer = QMessageBox.question(
             self.pet_window.chat_window,
             "发送给模型前，请确认隐私范围",
             "Pixkin 会把当前角色系统提示词、你的消息，以及受上下文"
             "上限约束的近期对话发送到以下模型接口：\n\n"
             f"{endpoint}\n\n"
+            + context_notice
+            + "已启用的长期记忆也可能随相关请求发送。\n\n"
             "聊天历史默认保存在本机；你可以在“设置 → 隐私与审计”"
             "中改为不保存、7 天、30 天或永久。",
             QMessageBox.StandardButton.Yes
@@ -1443,7 +2155,20 @@ class DesktopPetApp:
                 PetState.THINKING, complete_current=True
             )
 
+    def _on_ai_emotion(self, emotion):
+        if not isinstance(emotion, PetState):
+            return
+        self.pet_window.animator.request_state(
+            emotion,
+            duration_ms=1600,
+            restore=True,
+            complete_current=True,
+        )
+
     def _on_ai_chunk(self, chunk: str):
+        speech = getattr(self, "_speech_controller", None)
+        if speech is not None and speech.state is SpeechState.THINKING:
+            speech.begin_talking()
         self.pet_window.animator.request_state(
             PetState.TALKING, complete_current=True
         )
@@ -1507,9 +2232,85 @@ class DesktopPetApp:
             restore=False,
             complete_current=True,
         )
+        voice_service = getattr(self, "_voice_output_service", None)
+        tts_authorized = True
+        if (
+            voice_service is not None
+            and voice_service.enabled
+            and final_text
+            and not getattr(self, "_quitting", False)
+        ):
+            if not voice_service.provider.capabilities.offline:
+                permissions = getattr(self, "context_permission_service", None)
+                if permissions is None:
+                    tts_authorized = False
+                elif permissions.state(PermissionResource.NETWORK) is PermissionState.ASK:
+                    tts_token = ContextPermissionService.new_handoff_token()
+                    tts_decision = permissions.decide(
+                        PermissionResource.NETWORK,
+                        PermissionOperation.WRITE,
+                        handoff_token=tts_token,
+                    )
+                    tts_authorized = tts_decision.allowed
+                    if tts_authorized:
+                        voice_service.set_permission_token(tts_token)
+            if not tts_authorized:
+                voice_service = None
+        if (
+            voice_service is not None
+            and voice_service.enabled
+            and final_text
+            and not getattr(self, "_quitting", False)
+        ):
+            speech = getattr(self, "_speech_controller", None)
+            if speech is not None:
+                speech.begin_talking()
+            worker = TtsPlaybackWorker(voice_service, final_text)
+            self._tts_playback_worker = worker
+            self._tts_playback_workers.append(worker)
+            worker.finished.connect(worker.deleteLater)
+            worker.finished.connect(
+                lambda expected=worker: self._finish_tts_worker(expected)
+            )
+            worker.start()
+        else:
+            speech = getattr(self, "_speech_controller", None)
+            if speech is not None:
+                speech.finish()
+
+    def _finish_tts_worker(self, expected_worker) -> None:
+        """Finish TTS without clobbering a newer listening/interruption state."""
+        workers = [
+            worker
+            for worker in getattr(self, "_tts_playback_workers", [])
+            if worker is not expected_worker
+        ]
+        self._tts_playback_workers = workers
+        is_current = getattr(self, "_tts_playback_worker", None) is expected_worker
+        if is_current:
+            self._tts_playback_worker = next(
+                (
+                    worker
+                    for worker in reversed(workers)
+                    if worker.isRunning()
+                ),
+                None,
+            )
+        speech = getattr(self, "_speech_controller", None)
+        if (
+            is_current
+            and speech is not None
+            and speech.state is SpeechState.TALKING
+        ):
+            speech.finish()
+        self._close_retired_voice_output_services()
+        self._maybe_finish_quit()
 
     def _on_ai_error(self, error_message: str):
         LOGGER.warning("AI 请求失败: %s", error_message)
+        self._clear_pending_network_permission(
+            getattr(self, "_ai_permission_token", None)
+        )
         self.pet_window.chat_window.cancel_stream()
         self.pet_window.chat_window.append_message("error", error_message)
         self._store_message(
@@ -1527,11 +2328,15 @@ class DesktopPetApp:
             restore=False,
             complete_current=True,
         )
+        speech = getattr(self, "_speech_controller", None)
+        if speech is not None:
+            speech.finish()
 
     def _cleanup_ai_worker(self, worker):
         if self.ai_worker is worker:
             self.ai_worker = None
             self._ai_session_id = None
+            self._ai_permission_token = None
             self._ai_used_memories = []
             self._ai_started_at = 0.0
             self._ai_input_text = ""
@@ -1566,6 +2371,9 @@ class DesktopPetApp:
 
     def _cancel_ai_for_context_switch(self):
         self._last_user_text = ""
+        self._clear_pending_network_permission(
+            getattr(self, "_ai_permission_token", None)
+        )
         permission_bridge = getattr(
             self, "tool_permission_bridge", None
         )
@@ -1574,11 +2382,20 @@ class DesktopPetApp:
         worker = getattr(self, "ai_worker", None)
         if worker is None or not worker.isRunning():
             return
+        tts_workers = list(getattr(self, "_tts_playback_workers", []))
+        if not tts_workers:
+            tts_worker = getattr(self, "_tts_playback_worker", None)
+            if tts_worker is not None:
+                tts_workers = [tts_worker]
+        for tts_worker in tts_workers:
+            if tts_worker.isRunning():
+                tts_worker.stop_playback(cancel_request=True)
         for signal, callback in (
             (worker.chunk_received, self._on_ai_chunk),
             (worker.tool_executing, self._on_tool_executing),
             (worker.finished_response, self._on_ai_finished),
             (worker.error_occurred, self._on_ai_error),
+            (worker.emotion_detected, self._on_ai_emotion),
         ):
             try:
                 signal.disconnect(callback)
@@ -1738,6 +2555,10 @@ class DesktopPetApp:
             active_character_id=getattr(
                 self, "active_character_id", "default"
             ),
+            context_permission_service=getattr(
+                self, "context_permission_service", None
+            ),
+            provider_catalog=getattr(self, "provider_catalog", {}),
             live_providers=getattr(
                 self, "live_providers", ADAPTERS
             ),
@@ -1822,7 +2643,16 @@ class DesktopPetApp:
         self._apply_tray_theme()
         self._setup_global_hotkeys()
         self._refresh_microphone_status()
+        self._load_context_permissions()
+        for resource in dialog.privacy_panel.context_session_permissions():
+            self.context_permission_service.set_state(
+                resource,
+                PermissionState.ALLOW_SESSION,
+                session_only=True,
+            )
         self._restart_live_monitor()
+        self._setup_voice_output()
+        self._setup_proactive_companion()
         try:
             set_start_with_windows(
                 bool(self.config_mgr.get("app", "start_with_windows", False))
@@ -1843,9 +2673,13 @@ class DesktopPetApp:
             self.config_mgr,
             self.package_manager,
             character_service=self._characters(),
+            context_permission_service=getattr(
+                self, "context_permission_service", None
+            ),
             session_secret_store=getattr(
                 self, "session_secrets", None
             ),
+            provider_catalog=getattr(self, "provider_catalog", {}),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1904,6 +2738,7 @@ class DesktopPetApp:
         voice_recorder = getattr(self, "voice_recorder", None)
         if voice_recorder is not None:
             voice_recorder.cancel()
+        self._clear_pending_network_permission()
         self.pet_window.save_position()
         if self.live_monitor and self.live_monitor.isRunning():
             self.live_monitor.stop()
@@ -1915,6 +2750,26 @@ class DesktopPetApp:
         voice_worker = getattr(self, "_voice_worker", None)
         if voice_worker is not None and voice_worker.isRunning():
             voice_worker.requestInterruption()
+        proactive_timer = getattr(self, "_proactive_timer", None)
+        if proactive_timer is not None:
+            proactive_timer.stop()
+        tts_workers = list(getattr(self, "_tts_playback_workers", []))
+        if not tts_workers:
+            tts_worker = getattr(self, "_tts_playback_worker", None)
+            if tts_worker is not None:
+                tts_workers = [tts_worker]
+        for tts_worker in tts_workers:
+            if not tts_worker.isRunning():
+                continue
+            stop_playback = getattr(tts_worker, "stop_playback", None)
+            if callable(stop_playback):
+                stop_playback(cancel_request=True)
+            else:
+                tts_worker.requestInterruption()
+        self._retire_voice_output_service()
+        kernel = getattr(self, "kernel", None)
+        if kernel is not None:
+            kernel.stop()
         self.tray.hide()
         self._maybe_finish_quit()
 
@@ -1931,7 +2786,27 @@ class DesktopPetApp:
         voice_worker = getattr(self, "_voice_worker", None)
         if voice_worker is not None and voice_worker.isRunning():
             return
+        tts_workers = list(getattr(self, "_tts_playback_workers", []))
+        if not tts_workers:
+            tts_worker = getattr(self, "_tts_playback_worker", None)
+            if tts_worker is not None:
+                tts_workers = [tts_worker]
+        if any(worker.isRunning() for worker in tts_workers):
+            return
+        self._close_retired_voice_output_services()
+        voice_service = getattr(self, "_voice_output_service", None)
+        if voice_service is not None:
+            try:
+                voice_service.close()
+            except Exception:
+                pass
+            self._voice_output_service = None
         self._quit_finalized = True
+        memory_service = getattr(self, "memory_service", None)
+        if memory_service is not None:
+            close = getattr(memory_service, "close", None)
+            if callable(close):
+                close()
         self._instance_lock.unlock()
         self.app.quit()
 
@@ -1972,24 +2847,64 @@ def install_exception_hook():
                 str(exc_type),
             ),
         )
-        QMessageBox.critical(
-            None,
-            "Pixkin 遇到问题",
-            "程序发生异常，已生成本地脱敏崩溃摘要。"
-            "只有你在“设置 → 隐私与审计”主动导出时，"
-            "诊断包才会离开本机。\n\n"
-            + (
-                f"摘要：{report_path.name}\n"
-                if report_path is not None
-                else ""
+        if QApplication.instance() is not None:
+            QMessageBox.critical(
+                None,
+                "Pixkin 遇到问题",
+                "程序发生异常，已生成本地脱敏崩溃摘要。"
+                "只有你在“设置 → 隐私与审计”主动导出时，"
+                "诊断包才会离开本机。\n\n"
+                + (
+                    f"摘要：{report_path.name}\n"
+                    if report_path is not None
+                    else ""
+                )
+                + CrashReportStore._sanitize(str(exc_value)),
             )
-            + CrashReportStore._sanitize(str(exc_value)),
+
+    def handle_threading_exception(args):
+        if issubclass(args.exc_type, KeyboardInterrupt):
+            return
+        details = "".join(
+            traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback
+            )
+        )
+        try:
+            CrashReportStore().save_exception(
+                args.exc_type,
+                args.exc_value,
+                details,
+            )
+        except OSError as store_error:
+            LOGGER.error(
+                "后台线程崩溃摘要写入失败（%s）",
+                type(store_error).__name__,
+            )
+        thread_name = getattr(args.thread, "name", "unknown_thread")
+        log_event(
+            LOGGER,
+            logging.ERROR,
+            component="threading",
+            operation="unhandled_thread_exception",
+            error_category="unexpected",
+            message=f"后台线程未捕获异常: {thread_name}",
+            exception_type=getattr(
+                args.exc_type,
+                "__name__",
+                str(args.exc_type),
+            ),
         )
 
     sys.excepthook = handle_exception
+    import threading
+    threading.excepthook = handle_threading_exception
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     configure_logging()
     install_exception_hook()
     app_instance = DesktopPetApp()

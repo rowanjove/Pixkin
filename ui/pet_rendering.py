@@ -36,6 +36,7 @@ class PetRenderer:
         self.edge_reveal_padding = edge_reveal_padding
         self.package = None
         self.character_frames = {}
+        self._scaled_cache = {}
         self.dedicated_edge_states = set()
         self.edge_subject_bounds = {}
         self.edge_design_reveals = {}
@@ -43,6 +44,7 @@ class PetRenderer:
     def set_package(self, package: CharacterPackage | None) -> None:
         self.package = package
         self.character_frames.clear()
+        self._scaled_cache.clear()
         self.dedicated_edge_states.clear()
         self.edge_subject_bounds.clear()
         self.edge_design_reveals.clear()
@@ -72,6 +74,25 @@ class PetRenderer:
                 for frame_spec in animation.frames
             ):
                 self.dedicated_edge_states.add(state)
+
+    def _scaled_frame(self, frame: QPixmap, size: int) -> QPixmap:
+        """Scale each source frame at most once per render size.
+
+        ``paintEvent`` can run more often than an animation frame changes.
+        Keeping the scaled pixmap avoids repeating a relatively expensive
+        smooth transformation on every timer tick.
+        """
+        key = (int(frame.cacheKey()), int(size))
+        cached = self._scaled_cache.get(key)
+        if cached is None:
+            cached = frame.scaled(
+                size,
+                size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._scaled_cache[key] = cached
+        return cached
 
     def draw(
         self,
@@ -162,12 +183,7 @@ class PetRenderer:
             self.draw_fallback_character(painter, tick=tick)
             return
         _frames, animation = entry
-        scaled = frame.scaled(
-            172,
-            172,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        scaled = self._scaled_frame(frame, 172)
         if animation.legacy_effects:
             x = (self.design_size - scaled.width()) // 2
             y = self.design_size - scaled.height()
@@ -257,12 +273,7 @@ class PetRenderer:
             )
             return
         peek = peek_size * self.design_size / max(1, window_width)
-        scaled = frame.scaled(
-            64,
-            64,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        scaled = self._scaled_frame(frame, 64)
         if dock_side == "left":
             cx, cy = self.design_size - peek / 2, 90
         elif dock_side == "right":
@@ -299,12 +310,7 @@ class PetRenderer:
         painter.drawPixmap(x, y, scaled)
 
     def scaled_edge_art(self, frame):
-        scaled = frame.scaled(
-            self.edge_art_size,
-            self.edge_art_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        scaled = self._scaled_frame(frame, self.edge_art_size)
         cache_key = frame.cacheKey()
         subject = self.edge_subject_bounds.get(cache_key)
         if subject is None:

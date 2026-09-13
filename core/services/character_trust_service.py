@@ -33,10 +33,14 @@ class OfficialCharacterTrustStore:
             payload = json.loads(
                 self.manifest_path.read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise OfficialCharacterTrustError(
                 "官方角色哈希清单无法读取"
             ) from exc
+        if not isinstance(payload, dict):
+            raise OfficialCharacterTrustError(
+                "官方角色哈希清单根节点必须是对象"
+            )
         if payload.get("schema_version") != self.SCHEMA_VERSION:
             raise OfficialCharacterTrustError(
                 "官方角色哈希清单版本不兼容"

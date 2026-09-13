@@ -1,6 +1,6 @@
 # Pixkin v2 实施状态
 
-更新时间：2026-07-26
+更新时间：2026-09-13
 
 ## 已完成
 
@@ -66,7 +66,7 @@
 - Pyright 已覆盖 `core/`，当前零错误、零警告。
 - 全量测试已接入分支覆盖率门禁，当前总覆盖率 79.2%，门槛为 70%。
 - 已生成带精确版本和 SHA-256 哈希的 Windows `requirements-lock.txt`。
-- 已接入 `pip-audit` 和 CycloneDX SBOM，当前锁定依赖未发现已知漏洞。
+- 已接入 `pip-audit` 和 CycloneDX SBOM；本轮 `pip-audit` 因环境网络无响应未完成，不能据此宣称依赖无已知漏洞。
 - CI 与 Release Workflow 已改用锁定依赖和统一质量脚本。
 - 本地发行脚本会在构建前执行完整质量门禁，并把 `SBOM.cdx.json` 纳入发布哈希。
 - 文件夹版和便携版均已使用隔离用户目录完成自动启动、正常退出和日志验证。
@@ -173,6 +173,8 @@
 - `cmd.exe` 已从应用白名单和模型可见工具说明中移除。
 - 详细边界见 `docs/M9_SECURITY.md`。
 
+> M10–M12 下方的原始验收数字保留为阶段快照；本次 Capability 2.0.0 的最终门禁与产物证据以文末 v1.5.0 节为准。
+
 ### M10：稳定性与可观测性（已完成）
 
 - 结构化、滚动且脱敏的运行日志，以及有固定数量上限的本地崩溃摘要。
@@ -254,13 +256,23 @@
 - 伙伴工坊已直接输出带结构化人设、行为、兼容性和权利声明的 v2 基础级角色包，
   不再生成新的 v1 包。
 
-## 下一阶段
+### v1.5.0：Capability 2.0.0 实施状态（RELEASE CANDIDATE）
 
-后续升级统一按照 [UPGRADE_PLAN.md](UPGRADE_PLAN.md) 执行，不再在本文件重复维护路线。
-当前优先级为：
+公开版本号固定为 `1.5.0`，能力里程碑记为 `2.0.0`，不发布 `1.6/1.7/1.8/2.0` 公开号。
 
-1. M7 发布与质量基线：配置远程仓库/分支保护，完成 Windows 10/11 实机显示矩阵。
-2. M12 已完成；下一轮按真实用户反馈拆分后续产品增量。
+- Runtime：Kernel、ServiceContainer、EventBus、ActionDispatcher 和可测试 StartupCoordinator 已落地。
+- Provider：Chat/Image/TTS 使用统一 Registry；ASR、Vision、Embedding、Realtime、Trigger 已预留同一扩展契约；ModelProfile 支持能力 override。
+- Speech：VAD 迟滞、SpeechState、AI 打断、ASR 注入边界和 TTS 状态同步已落地，旧按住说话入口保持兼容。
+- Perception：窗口、进程、系统空闲、剪贴板和按需截图接入 default-deny 权限；ContextBudget 防止无关内容全量进入 Prompt。
+- Memory/Character：SQLite+FTS5 MemoryV2、JSON 幂等迁移、角色状态持久化、Renderer 契约和 Character Card 编解码已落地；角色包接受 v3 runtime sections。
+- Plugin/MCP/Tools：进程隔离插件、safe mode、stdio/Streamable HTTP MCP、工具 metadata/超时/执行上下文/脱敏审计已落地。
+- Governance：Apache-2.0、架构检查脚本和质量脚本门禁已加入。
+
+详细验收矩阵见 [docs/ROADMAP_1.5_CAPABILITY_2.0.md](docs/ROADMAP_1.5_CAPABILITY_2.0.md)。
+
+当前源码质量证据：质量门禁 `459 passed, 46 subtests passed`，总覆盖率 `74.99%`；Ruff、Pyright（Python 3.11）、架构检查和 compileall 通过。本轮修复后的 onedir 与 portable 已重新构建并通过隔离启动/退出烟测；安装器、`pip-audit`、SBOM 和正式发布目录仍需重新执行后才能恢复为完整发布证据。
+
+未在本环境演练的手工场景：真实麦克风/ASR、云端 TTS、物理多显示器（Windows 10/11 实机差异）以及真实外部 MCP 服务。它们不改变源码和自动化发布物状态，但在面向终端用户发布前仍应按验收矩阵执行。
 
 本轮计划明确不包含购买商业代码签名证书，SmartScreen 零提示不作为验收目标。
 
@@ -268,5 +280,5 @@
 
 - Python：3.11
 - Qt：offscreen 测试模式
-- 当前结果：333 项测试与 32 个子测试通过；总分支覆盖率 77.63%，门槛为 70%。
+- 当前结果：全量测试与覆盖率以最终质量门禁输出为准；门槛为 70%。
 - PyInstaller：文件夹版与便携版构建通过

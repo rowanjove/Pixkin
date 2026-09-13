@@ -7,7 +7,7 @@ import hashlib
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence, cast
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from openai import OpenAI
 
@@ -20,6 +20,8 @@ from core.providers.image.base import (
 
 
 class OpenAICompatibleImageProvider(ImageProvider):
+    MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
     def __init__(
         self,
         *,
@@ -31,7 +33,7 @@ class OpenAICompatibleImageProvider(ImageProvider):
         client_factory: Callable[..., Any] = OpenAI,
     ):
         self.api_key = api_key
-        self._endpoint = base_url or "https://api.openai.com/v1"
+        self._endpoint = str(base_url or "https://api.openai.com/v1").strip()
         self._model = model or "gpt-image-2"
         self.quality = quality or "medium"
         self._client = client
@@ -78,9 +80,30 @@ class OpenAICompatibleImageProvider(ImageProvider):
         )
 
     def validate(self):
-        parsed = urlparse(self.endpoint)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("图像接口地址必须是完整的 HTTP(S) URL。")
+        try:
+            parsed = urlsplit(self.endpoint)
+        except ValueError as exc:
+            raise ValueError(
+                "图像接口地址必须使用 HTTPS（仅允许 localhost 使用 HTTP），"
+                "且不得包含凭据或查询参数。"
+            ) from exc
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not host
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or (
+                parsed.scheme == "http"
+                and host not in {"localhost", "127.0.0.1", "::1"}
+            )
+        ):
+            raise ValueError(
+                "图像接口地址必须使用 HTTPS（仅允许 localhost 使用 HTTP），"
+                "且不得包含凭据或查询参数。"
+            )
         if not self.model.strip():
             raise ValueError("图像模型名不能为空。")
         if self.quality not in {"low", "medium", "high"}:
@@ -104,7 +127,7 @@ class OpenAICompatibleImageProvider(ImageProvider):
             retrieve(self.model, timeout=15.0)
         except Exception as exc:
             details = classify_image_error(exc)
-            hostname = urlparse(self.endpoint).hostname
+            hostname = urlsplit(self.endpoint).hostname
             official = hostname in {
                 "api.openai.com",
                 "www.api.openai.com",
@@ -159,10 +182,18 @@ class OpenAICompatibleImageProvider(ImageProvider):
         encoded = data[0].b64_json if data else None
         if not encoded:
             raise RuntimeError("图像服务没有返回可用图片。")
+        if not isinstance(encoded, (str, bytes, bytearray)):
+            raise RuntimeError("图像服务返回的图片数据损坏。")
+        max_encoded_bytes = 4 * ((self.MAX_IMAGE_BYTES + 2) // 3)
+        if len(encoded) > max_encoded_bytes:
+            raise RuntimeError("图像服务返回的图片超过 20 MB 上限。")
         try:
-            return base64.b64decode(encoded, validate=True)
+            decoded = base64.b64decode(encoded, validate=True)
         except (ValueError, TypeError) as exc:
             raise RuntimeError("图像服务返回的图片数据损坏。") from exc
+        if len(decoded) > self.MAX_IMAGE_BYTES:
+            raise RuntimeError("图像服务返回的图片超过 20 MB 上限。")
+        return decoded
 
     def close(self):
         if self._client is None:

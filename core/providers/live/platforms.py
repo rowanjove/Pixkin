@@ -216,11 +216,22 @@ class DouyinLiveAdapter(BaseLiveAdapter):
 
     @classmethod
     def _validated_douyin_url(cls, value: str) -> str:
-        parsed = urlparse(value)
+        try:
+            parsed = urlparse(value)
+        except ValueError as exc:
+            raise LiveProviderError(
+                "抖音直播间地址必须使用受信任的抖音域名"
+            ) from exc
         host = (parsed.hostname or "").lower().rstrip(".")
-        if parsed.scheme != "https" or not any(
-            host == suffix or host.endswith("." + suffix)
-            for suffix in cls.ALLOWED_HOST_SUFFIXES
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or not any(
+                host == suffix or host.endswith("." + suffix)
+                for suffix in cls.ALLOWED_HOST_SUFFIXES
+            )
         ):
             raise LiveProviderError(
                 "抖音直播间地址必须使用受信任的抖音域名"

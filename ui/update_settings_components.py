@@ -22,6 +22,11 @@ from core.services.update_service import (
     detect_install_mode,
 )
 from core.version import VERSION
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionOperation,
+    PermissionResource,
+)
 
 
 class UpdateCheckWorker(QThread):
@@ -33,14 +38,28 @@ class UpdateCheckWorker(QThread):
         service: UpdateService,
         manifest_url: str,
         channel: str,
+        *,
+        permission_service: ContextPermissionService | None = None,
+        permission_token: str | None = None,
     ):
         super().__init__(QApplication.instance())
         self.service = service
         self.manifest_url = manifest_url
         self.channel = channel
+        self.permission_service = permission_service or ContextPermissionService()
+        self.permission_token = permission_token
 
     def run(self):
         try:
+            decision = self.permission_service.decide(
+                PermissionResource.NETWORK,
+                PermissionOperation.READ,
+                resolve_ask=False,
+                consume_pending=True,
+                handoff_token=self.permission_token,
+            )
+            if not decision.allowed:
+                raise PermissionError("网络权限未允许")
             release = self.service.fetch_release(
                 self.manifest_url,
                 channel=self.channel,
@@ -56,13 +75,31 @@ class UpdateDownloadWorker(QThread):
     completed = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, service: UpdateService, release: UpdateRelease):
+    def __init__(
+        self,
+        service: UpdateService,
+        release: UpdateRelease,
+        *,
+        permission_service: ContextPermissionService | None = None,
+        permission_token: str | None = None,
+    ):
         super().__init__(QApplication.instance())
         self.service = service
         self.release = release
+        self.permission_service = permission_service or ContextPermissionService()
+        self.permission_token = permission_token
 
     def run(self):
         try:
+            decision = self.permission_service.decide(
+                PermissionResource.NETWORK,
+                PermissionOperation.READ,
+                resolve_ask=False,
+                consume_pending=True,
+                handoff_token=self.permission_token,
+            )
+            if not decision.allowed:
+                raise PermissionError("网络权限未允许")
             installer = self.service.download_installer(self.release)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -82,11 +119,14 @@ class UpdateSettingsPanel(QWidget):
         channel: str,
         automatic_updates: bool,
         install_mode: str | None = None,
+        permission_service: ContextPermissionService | None = None,
     ):
         super().__init__()
         self.service = service
         self.manifest_urls = manifest_urls or {}
         self.install_mode = install_mode or detect_install_mode()
+        self.permission_service = permission_service or ContextPermissionService()
+        self._permission_token = None
         self._release: UpdateRelease | None = None
         self._worker = None
 
@@ -177,11 +217,15 @@ class UpdateSettingsPanel(QWidget):
     def check_now(self):
         if self.service is None or not self._manifest_url():
             return
+        if not self._network_allowed():
+            return
         self._set_busy(True, "正在验证更新清单……")
         worker = UpdateCheckWorker(
             self.service,
             self._manifest_url(),
             str(self.channel_input.currentData()),
+            permission_service=self.permission_service,
+            permission_token=self._permission_token,
         )
         worker.completed.connect(self._check_completed)
         worker.failed.connect(self._operation_failed)
@@ -203,6 +247,8 @@ class UpdateSettingsPanel(QWidget):
     def download(self):
         if self.service is None or self._release is None:
             return
+        if not self._network_allowed():
+            return
         answer = QMessageBox.question(
             self,
             "下载更新",
@@ -213,14 +259,43 @@ class UpdateSettingsPanel(QWidget):
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
+            self._clear_permission_token()
             return
         self._set_busy(True, "正在下载并校验安装器……")
-        worker = UpdateDownloadWorker(self.service, self._release)
+        worker = UpdateDownloadWorker(
+            self.service,
+            self._release,
+            permission_service=self.permission_service,
+            permission_token=self._permission_token,
+        )
         worker.completed.connect(self._download_completed)
         worker.failed.connect(self._operation_failed)
         worker.finished.connect(self._worker_finished)
         self._worker = worker
         worker.start()
+
+    def _network_allowed(self) -> bool:
+        self._permission_token = self.permission_service.new_handoff_token()
+        decision = self.permission_service.decide(
+            PermissionResource.NETWORK,
+            PermissionOperation.READ,
+            handoff_token=self._permission_token,
+        )
+        if decision.allowed:
+            return True
+        self.status_label.setText(
+            "网络权限未允许；请先在“隐私与审计”中授权。"
+        )
+        self._clear_permission_token()
+        return False
+
+    def _clear_permission_token(self) -> None:
+        self.permission_service.clear_pending(
+            PermissionResource.NETWORK,
+            PermissionOperation.READ,
+            handoff_token=self._permission_token,
+        )
+        self._permission_token = None
 
     def _download_completed(self, installer: str):
         self.status_label.setText(
@@ -232,6 +307,7 @@ class UpdateSettingsPanel(QWidget):
         self.status_label.setText(f"更新操作未完成：{message}")
 
     def _worker_finished(self):
+        self._clear_permission_token()
         self._worker = None
         self._set_busy(False)
 

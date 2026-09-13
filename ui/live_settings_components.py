@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.providers.live import ADAPTERS
+from core.services.live_catalog import builtin_live_providers
 
 
 PLATFORM_LABELS = {
@@ -58,7 +58,7 @@ class LiveRoomEditor(QWidget):
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
-        self.providers = providers or ADAPTERS
+        self.providers = providers or builtin_live_providers()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -115,7 +115,7 @@ class LiveRoomEditor(QWidget):
         providers=None,
     ) -> list[tuple[str, str, str]]:
         platforms = []
-        for platform_id, provider in (providers or ADAPTERS).items():
+        for platform_id, provider in (providers or builtin_live_providers()).items():
             capabilities = provider.capabilities
             if not capabilities.status_check:
                 continue

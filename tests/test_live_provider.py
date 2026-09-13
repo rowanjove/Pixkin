@@ -66,6 +66,10 @@ class LiveProviderContractTests(unittest.TestCase):
             DouyinLiveAdapter._validated_douyin_url(
                 "http://live.douyin.com/123"
             )
+        with self.assertRaises(LiveProviderError):
+            DouyinLiveAdapter._validated_douyin_url(
+                "https://user:secret@live.douyin.com/123"
+            )
 
     def test_plaintext_room_cookie_is_ignored_for_isolated_provider_credential(self):
         adapter = BilibiliLiveAdapter(

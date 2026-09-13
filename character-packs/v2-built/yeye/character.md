@@ -164,7 +164,7 @@ animations:
   edge_hover_top:
     source: {type: frames, files: ["images/edge/top-03.png", "images/edge/top-04.png", "images/edge/top-05.png", "images/edge/top-04.png"], cell_size: [192, 208]}
     fps: 7
-    playback: ping_pong
+    playback: once
     anchor: [96, 104]
   edge_exit_top:
     source: {type: frames, files: ["images/edge/top-03.png", "images/edge/top-02.png", "images/edge/top-01.png", "images/edge/top-00.png"], cell_size: [192, 208]}
@@ -184,7 +184,7 @@ animations:
   edge_hover_bottom:
     source: {type: frames, files: ["images/edge/bottom-03.png", "images/edge/bottom-04.png", "images/edge/bottom-05.png", "images/edge/bottom-04.png"], cell_size: [192, 208]}
     fps: 7
-    playback: ping_pong
+    playback: once
     anchor: [96, 104]
   edge_exit_bottom:
     source: {type: frames, files: ["images/edge/bottom-03.png", "images/edge/bottom-02.png", "images/edge/bottom-01.png", "images/edge/bottom-00.png"], cell_size: [192, 208]}
@@ -192,7 +192,8 @@ animations:
     playback: once
     anchor: [96, 104]
 compatibility:
-  min_app_version: 2.0.0
+  min_app_version: 1.5.0
+  min_capability_version: 2.0.0
   atlas_layout: pixkin-8x9
 rights:
   license: project-distribution

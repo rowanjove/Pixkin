@@ -55,3 +55,11 @@ class OfficialCharacterTrustTests(unittest.TestCase):
 
             with self.assertRaises(OfficialCharacterTrustError):
                 OfficialCharacterTrustStore(manifest)
+
+    def test_non_object_manifest_root_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.json"
+            manifest.write_text("[]", encoding="utf-8")
+
+            with self.assertRaises(OfficialCharacterTrustError):
+                OfficialCharacterTrustStore(manifest)

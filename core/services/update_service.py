@@ -115,6 +115,7 @@ def installed_manifest_urls(
 
 
 class UpdateManifestVerifier:
+    MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
     _SIGNED_KEYS = {
         "version",
         "channel",
@@ -228,7 +229,12 @@ class UpdateManifestVerifier:
 
     @staticmethod
     def _https_url(value: str) -> str:
-        parsed = urlparse(value)
+        try:
+            parsed = urlparse(value)
+        except ValueError as exc:
+            raise UpdateSecurityError(
+                "更新地址必须是无凭据的 HTTPS URL"
+            ) from exc
         if (
             parsed.scheme != "https"
             or not parsed.netloc
@@ -248,6 +254,8 @@ class UpdateManifestVerifier:
         size = data.get("size")
         if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
             raise UpdateSecurityError("安装器大小无效")
+        if size > self.MAX_ARTIFACT_BYTES:
+            raise UpdateSecurityError("安装器超过 512 MiB 上限")
         digest = self._required_string(data, "sha256").lower()
         if len(digest) != 64 or any(
             character not in "0123456789abcdef" for character in digest
@@ -347,6 +355,8 @@ class UpdateService:
 
     def download_installer(self, release: UpdateRelease) -> Path:
         artifact = release.artifact
+        if artifact.size > UpdateManifestVerifier.MAX_ARTIFACT_BYTES:
+            raise UpdateSecurityError("安装器超过 512 MiB 上限")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         target = self.cache_dir / artifact.filename
         descriptor, temporary = tempfile.mkstemp(
@@ -368,8 +378,17 @@ class UpdateService:
                     response.raise_for_status()
                     UpdateManifestVerifier._https_url(response.url)
                     declared = response.headers.get("content-length")
-                    if declared and int(declared) != artifact.size:
-                        raise UpdateSecurityError("安装器响应大小与清单不一致")
+                    if declared:
+                        try:
+                            declared_size = int(declared)
+                        except (TypeError, ValueError) as exc:
+                            raise UpdateSecurityError(
+                                "安装器响应大小无效"
+                            ) from exc
+                        if declared_size != artifact.size:
+                            raise UpdateSecurityError(
+                                "安装器响应大小与清单不一致"
+                            )
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if not chunk:
                             continue
@@ -403,10 +422,155 @@ class UpdateService:
         target = Path(installer).resolve()
         if target.parent != self.cache_dir.resolve() or not target.is_file():
             raise UpdateSecurityError("只能启动已验证的更新缓存安装器")
+        self._verify_installer_receipt(target)
         arguments = [str(target), "/CURRENTUSER", "/SP-", "/NORESTART"]
         if allow_downgrade:
             arguments.append("/ALLOWDOWNGRADE")
         return subprocess.Popen(arguments, close_fds=True)
+
+    def _verify_installer_receipt(self, installer: Path) -> dict[str, Any]:
+        """在执行前重新验证下载回执及其当前文件内容。"""
+
+        matches: list[tuple[Path, dict[str, Any]]] = []
+        for receipt_path in self.cache_dir.glob("*.receipt.json"):
+            try:
+                payload = json.loads(
+                    receipt_path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("installer") == installer.name:
+                matches.append((receipt_path, payload))
+        if len(matches) != 1:
+            raise UpdateSecurityError("更新安装器缺少唯一有效回执")
+
+        receipt_path, receipt = matches[0]
+        if set(receipt) != {
+            "schema_version",
+            "version",
+            "channel",
+            "installer",
+            "size",
+            "sha256",
+            "verified_at",
+            "manifest",
+        }:
+            raise UpdateSecurityError("更新安装器回执字段无效")
+        version = receipt.get("version")
+        if not isinstance(version, str):
+            raise UpdateSecurityError("更新安装器回执版本无效")
+        try:
+            parse_version(version)
+        except UpdateError as exc:
+            raise UpdateSecurityError("更新安装器回执版本无效") from exc
+        if receipt_path.name != f"{version}.receipt.json":
+            raise UpdateSecurityError("更新安装器回执文件名不匹配")
+        if receipt.get("channel") not in {"stable", "beta"}:
+            raise UpdateSecurityError("更新安装器回执渠道无效")
+        manifest = receipt.get("manifest")
+        if not isinstance(manifest, dict):
+            raise UpdateSecurityError("更新安装器回执清单无效")
+        self._verify_receipt_manifest_binding(
+            manifest,
+            version=version,
+            channel=str(receipt["channel"]),
+            installer=installer.name,
+            size=receipt.get("size"),
+            sha256=receipt.get("sha256"),
+        )
+        try:
+            self.verifier._parse_time(str(receipt.get("verified_at") or ""))
+        except UpdateSecurityError:
+            raise
+        size = receipt.get("size")
+        digest = receipt.get("sha256")
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or size <= 0
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in digest.lower()
+            )
+        ):
+            raise UpdateSecurityError("更新安装器回执校验值无效")
+        if receipt.get("installer") != installer.name:
+            raise UpdateSecurityError("更新安装器回执文件名不匹配")
+        try:
+            actual_size = installer.stat().st_size
+        except OSError as exc:
+            raise UpdateSecurityError("更新安装器无法读取") from exc
+        if actual_size != size:
+            raise UpdateSecurityError("更新安装器大小与回执不一致")
+        actual_digest = self._file_digest(installer)
+        if actual_digest != digest.lower():
+            raise UpdateSecurityError("更新安装器 SHA-256 与回执不一致")
+        return receipt
+
+    def _verify_receipt_manifest_binding(
+        self,
+        manifest: dict[str, Any],
+        *,
+        version: str,
+        channel: str,
+        installer: str,
+        size: Any,
+        sha256: Any,
+    ) -> None:
+        """Recheck the signed artifact metadata stored in a local receipt."""
+        try:
+            loaded = self.verifier._load(manifest)
+            if set(loaded) != {"schema_version", "signed", "signature"}:
+                raise UpdateSecurityError("更新回执清单字段无效")
+            if loaded["schema_version"] != 1 or not isinstance(
+                loaded["signed"], dict
+            ):
+                raise UpdateSecurityError("更新回执清单版本无效")
+            signature = base64.b64decode(
+                loaded["signature"],
+                validate=True,
+            )
+            self.verifier.public_key.verify(
+                signature,
+                canonical_payload(loaded["signed"]),
+            )
+            signed = loaded["signed"]
+            if signed.get("version") != version or signed.get("channel") != channel:
+                raise UpdateSecurityError("更新回执与签名版本或渠道不一致")
+            artifacts = signed.get("artifacts")
+            if not isinstance(artifacts, list):
+                raise UpdateSecurityError("更新回执缺少签名产物")
+            matching = [
+                item
+                for item in artifacts
+                if isinstance(item, dict)
+                and item.get("kind") == "installer"
+                and item.get("filename") == installer
+                and item.get("size") == size
+                and str(item.get("sha256", "")).lower() == str(sha256).lower()
+            ]
+            if len(matching) != 1:
+                raise UpdateSecurityError("更新回执产物绑定无效")
+        except (InvalidSignature, TypeError, ValueError, KeyError) as exc:
+            raise UpdateSecurityError("更新回执签名无效") from exc
+
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(
+                    lambda: handle.read(1024 * 1024),
+                    b"",
+                ):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise UpdateSecurityError("更新安装器无法读取") from exc
+        return digest.hexdigest()
 
     def available_rollback(
         self,

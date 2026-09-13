@@ -19,11 +19,13 @@ from PyQt6.QtWidgets import (
 )
 
 from core.providers.chat.base import ChatProviderHealth
-from core.providers.chat.openai_compatible import (
-    OpenAICompatibleChatProvider,
-)
 from core.secrets import SecretStore
 from core.services.session_secret_store import SessionSecretStore
+from core.runtime.permissions import (
+    ContextPermissionService,
+    PermissionOperation,
+    PermissionResource,
+)
 
 
 class ChatProviderHealthWorker(QThread):
@@ -35,7 +37,9 @@ class ChatProviderHealthWorker(QThread):
         base_url: str,
         api_key: str,
         model: str,
-        provider_factory: Callable = OpenAICompatibleChatProvider,
+        provider_factory: Callable | None = None,
+        permission_service: ContextPermissionService | None = None,
+        permission_token: str | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -43,10 +47,23 @@ class ChatProviderHealthWorker(QThread):
         self.api_key = api_key
         self.model = model
         self.provider_factory = provider_factory
+        self.permission_service = permission_service or ContextPermissionService()
+        self.permission_token = permission_token
 
     def run(self) -> None:
         provider = None
         try:
+            decision = self.permission_service.decide(
+                PermissionResource.NETWORK,
+                PermissionOperation.READ,
+                resolve_ask=False,
+                consume_pending=True,
+                handoff_token=self.permission_token,
+            )
+            if not decision.allowed:
+                raise PermissionError("网络权限未允许")
+            if self.provider_factory is None:
+                raise RuntimeError("未注册聊天 Provider")
             provider = self.provider_factory(
                 api_key=self.api_key,
                 base_url=self.base_url,
@@ -76,13 +93,19 @@ class ModelSettingsPanel(QWidget):
         self,
         config_manager,
         session_secrets: SessionSecretStore,
+        *,
+        provider_registry=None,
+        permission_service: ContextPermissionService | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.config_manager = config_manager
         self.session_secrets = session_secrets
+        self.provider_registry = provider_registry
+        self.permission_service = permission_service or ContextPermissionService()
         self._models: tuple[str, ...] = ()
         self._health_worker = None
+        self._permission_token = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -203,6 +226,19 @@ class ModelSettingsPanel(QWidget):
             and self._health_worker.isRunning()
         ):
             return
+        permission_token = self.permission_service.new_handoff_token()
+        self._permission_token = permission_token
+        decision = self.permission_service.decide(
+            PermissionResource.NETWORK,
+            PermissionOperation.READ,
+            handoff_token=permission_token,
+        )
+        if not decision.allowed:
+            self.connection_status.setText(
+                "网络权限未允许；请先在“隐私与审计”中授权。"
+            )
+            self._clear_permission_token()
+            return
         self.test_connection_btn.setDisabled(True)
         self.connection_status.setText("正在检查连接和模型列表…")
         worker = ChatProviderHealthWorker(
@@ -210,11 +246,29 @@ class ModelSettingsPanel(QWidget):
             api_key=api_key,
             model=model,
             parent=QApplication.instance(),
+            provider_factory=(
+                (lambda **kwargs: self.provider_registry.create(
+                    "openai_compatible", **kwargs
+                ))
+                if self.provider_registry is not None
+                else None
+            ),
+            permission_service=self.permission_service,
+            permission_token=permission_token,
         )
         self._health_worker = worker
         worker.checked.connect(self._on_health_checked)
+        worker.finished.connect(self._clear_permission_token)
         worker.finished.connect(worker.deleteLater)
         worker.start()
+
+    def _clear_permission_token(self) -> None:
+        self.permission_service.clear_pending(
+            PermissionResource.NETWORK,
+            PermissionOperation.READ,
+            handoff_token=self._permission_token,
+        )
+        self._permission_token = None
 
     def _on_health_checked(self, health: object) -> None:
         self.test_connection_btn.setEnabled(True)
