@@ -4,21 +4,40 @@
 
 Pixkin is a desktop companion for Windows 10/11 x64, with character animation, model conversations, character-package imports, an image-generation workshop, and Bilibili/Douyin live-stream notifications. Characters respond to clicks and dragging, dock at screen edges, and can remain in the system tray.
 
-[Download v1.3.0](https://github.com/rowanjove/pixkin/releases/tag/v1.3.0) · [Issues](https://github.com/rowanjove/pixkin/issues) · [Character package format](CHARACTER_PACKAGE_SPEC.md)
+[Download v1.5.0](https://github.com/rowanjove/Pixkin/releases/tag/v1.5.0) · [Issues](https://github.com/rowanjove/Pixkin/issues) · [Character package format](CHARACTER_PACKAGE_SPEC.md)
 
-Releases bundle the runtime; users do not need to install Python. Chat, transcription, and character generation can call external model services using your configuration and may incur charges. This is not a fully offline AI application.
+The v1.5.0 public version aligns with the internal Capability 2.0 milestone. Releases bundle the runtime; users do not need to install Python. Chat, transcription, and character generation can call external model services using your configuration and may incur charges. This is not a fully offline AI application.
 
 ## Install and get started
 
 Choose a Release asset:
 
-- `Pixkin-1.3.0-win64.zip`: recommended folder build; extract the entire folder and run `Pixkin.exe`.
-- `Pixkin-Portable-1.3.0.exe`: single-file build; expands its runtime at launch and may start more slowly.
-- `Pixkin-Setup-1.3.0.exe`: installer.
+- `Pixkin-1.5.0-win64.zip`: recommended folder build; extract the entire folder and run `Pixkin.exe`.
+- `Pixkin-Portable-1.5.0.exe`: single-file build; expands its runtime at launch and may start more slowly.
+- `Pixkin-Setup-1.5.0.exe`: installer.
+
+See the [v1.5.0 release notes](docs/RELEASE_NOTES_v1.5.0.md) for changes,
+verification evidence, and known limitations.
 
 Shanshan is the default character. Switch to Linlin or Pip in Settings, or import a character ZIP. Click the companion to open its conversation bubble; use the tray for Settings and the workshop.
 
 Current binaries do not have commercial code signing and may trigger SmartScreen or security software warnings. Download only from this repository's Releases and check integrity against `SHA256SUMS.txt`.
+
+## Screenshots
+
+These screenshots were rendered from the v1.5.0 release candidate with an isolated configuration. They contain no real account, API key, or user data.
+
+### Conversation bubble
+
+![Pixkin conversation bubble](docs/screenshots/chat-window.png)
+
+### Settings center
+
+![Pixkin settings center](docs/screenshots/settings-center.png)
+
+### Companion workshop
+
+![Pixkin companion workshop](docs/screenshots/pet-lab.png)
 
 ## Conversations, memory, and tools
 
@@ -131,4 +150,4 @@ CI's isolated startup, operating-system, and scaling matrix does not replace man
 
 [Architecture](docs/M8_ARCHITECTURE.md) · [Security](docs/M9_SECURITY.md) · [Stability and recovery](docs/M10_STABILITY.md) · [Installation, updates, and rollback](docs/M11_INSTALL_UPDATE.md) · [Product capabilities](docs/M12_PRODUCT_CAPABILITIES.md)
 
-The interface and supporting guides are primarily Chinese. The repository currently has no separate LICENSE file; this documentation does not add or imply redistribution rights for code or character assets. Check third-party characters' authorship and licenses separately.
+The interface and supporting guides are primarily Chinese. The source code in this repository is licensed under [Apache-2.0](LICENSE). Character packs and other bundled assets may have separate authorship or licensing terms; check each asset's metadata before redistribution.
